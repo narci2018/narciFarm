@@ -216,6 +216,7 @@ async def api_input(serial: str, body: dict):
     except adb.AdbError as e:
         bus.error(f"[{serial}] 注入失败: {e}")
         return {"ok": False, "error": str(e)}
+    bus.info(f"[{serial}] 注入[adb] {body['action']} {json.dumps(body.get('params', {}), ensure_ascii=False)[:100]}")
     return {"ok": True}
 
 
