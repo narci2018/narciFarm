@@ -5,6 +5,7 @@ const State = {
   groups: [],
   scenarios: [],
   schedules: [],
+  apps: [],
   selected: new Set(),
   settings: {},
   currentScenario: null,
@@ -33,6 +34,7 @@ async function init() {
   bindScenario();
   bindSchedule();
   bindConsole();
+  bindApps();
   bindCaptures();
   bindModal();
   connectEventStream();
@@ -157,7 +159,7 @@ function bindOverview() {
 
 function fillDeviceSelects() {
   const online = State.devices.filter(d => d.state === 'device');
-  for (const [selId, defEmpty] of [['bc-master', true], ['cs-device', true], ['mm-device', false]]) {
+  for (const [selId] of [['bc-master'], ['cs-device'], ['am-device']]) {
     const sel = $(selId);
     if (!sel) continue;
     const cur = sel.value;
@@ -222,6 +224,7 @@ function bindTabs() {
       tab.classList.add('active');
       $(`tab-${tab.dataset.tab}`).classList.add('active');
       if (tab.dataset.tab === 'captures') loadCaptures();
+      if (tab.dataset.tab === 'apps') loadApps();
       if (tab.dataset.tab === 'schedule') refreshSchedules();
     };
   });
@@ -467,6 +470,56 @@ function bindConsole() {
   $('cs-cmd').onkeydown = (e) => { if (e.key === 'Enter') run(); };
 }
 
+// ---------- 应用管理 ----------
+
+function bindApps() {
+  $('am-reload').onclick = loadApps;
+  $('am-search').oninput = renderApps;
+  $('am-device').onchange = loadApps;
+}
+
+async function loadApps() {
+  const serial = $('am-device').value;
+  if (!serial) return;
+  const tb = $('am-table').querySelector('tbody');
+  tb.innerHTML = '<tr><td colspan="3" class="hint">加载中…（首次约 3~5 秒）</td></tr>';
+  try {
+    const r = await API.get(`/api/devices/${encodeURIComponent(serial)}/apps`);
+    State.apps = r.apps;
+    renderApps();
+  } catch (e) {
+    tb.innerHTML = `<tr><td colspan="3" class="hint">加载失败: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function renderApps() {
+  const tb = $('am-table').querySelector('tbody');
+  const q = ($('am-search').value || '').toLowerCase();
+  const list = (State.apps || []).filter(a => a.toLowerCase().includes(q));
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="3" class="hint">无应用（先加载列表）</td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map((p, i) =>
+    `<tr><td>${i + 1}</td><td class="dserial">${esc(p)}</td>
+     <td style="white-space:nowrap">
+       <button class="btn small" data-act="launch" data-pkg="${esc(p)}">启动</button>
+       <button class="btn small" data-act="stop" data-pkg="${esc(p)}">停止</button>
+       <button class="btn small danger" data-act="uninstall" data-pkg="${esc(p)}">卸载</button>
+     </td></tr>`).join('');
+  tb.querySelectorAll('button[data-act]').forEach(btn => {
+    btn.onclick = async () => {
+      const pkg = btn.dataset.pkg, act = btn.dataset.act;
+      const serial = $('am-device').value;
+      if (act === 'uninstall' && !confirm(`确认在 ${serial} 上卸载 ${pkg}？`)) return;
+      try {
+        const r = await API.post(`/api/devices/${encodeURIComponent(serial)}/apps/${encodeURIComponent(pkg)}/${act}`);
+        toast(`[${pkg}] ${act} 成功${r.out ? ': ' + r.out : ''}`, 'ok');
+      } catch (e) { toast(`${pkg} ${act} 失败: ${e.message}`, 'error', 6000); }
+    };
+  });
+}
+
 // ---------- 截图库 ----------
 
 async function loadCaptures() {
@@ -490,9 +543,13 @@ function openMirror(serial, opts = {}) {
   $('mirror-modal').classList.remove('hidden');
   $('mm-title').textContent = `投屏 ${serial}`;
   $('mm-broadcast').checked = !!opts.defaultBroadcast;
+  $('mm-inject-status').textContent = '就绪';
+  $('mm-inject-status').className = 'hint';
   const canvas = $('mm-canvas');
   const recInd = $('mm-record-ind');
   const recorded = [];
+  let videoRecorder = null;
+  let videoChunks = [];
 
   const getTargets = () => {
     if (!$('mm-broadcast').checked) return [serial];
@@ -539,6 +596,7 @@ function openMirror(serial, opts = {}) {
   $('mirror-modal').onclick = (e) => { if (e.target === $('mirror-modal')) closeMirror(); };
   function closeMirror() {
     clearInterval(statsTimer);
+    if (videoRecorder && videoRecorder.state !== 'inactive') videoRecorder.stop();
     if (State.mirror) { State.mirror.close(); State.mirror = null; }
     $('mirror-modal').classList.add('hidden');
     recInd.textContent = '';
@@ -547,9 +605,27 @@ function openMirror(serial, opts = {}) {
   document.querySelectorAll('.mirror-subbar [data-key]').forEach(btn => {
     btn.onclick = () => State.mirror && State.mirror.key(btn.dataset.key);
   });
-  $('mm-send-text').onclick = () => {
+  $('mm-send-text').onclick = async () => {
     const t = $('mm-text').value;
-    if (t && State.mirror) { State.mirror.sendText(t); toast(`已发送到 ${getTargets().length} 台设备`, 'ok'); }
+    if (!t || !State.mirror) return;
+    if (/[^\x00-\x7F]/.test(t)) {
+      // 含非 ASCII（中文等）: input text 不支持, 自动走剪贴板粘贴路径
+      if (!State.mirror.pasteText(t)) return toast('粘贴需要实时投屏模式', 'error');
+      toast('中文文本已通过剪贴板粘贴（需焦点在手机输入框）', 'ok');
+    } else {
+      State.mirror.sendText(t);
+      toast(`已发送到 ${getTargets().length} 台设备`, 'ok');
+    }
+  };
+  $('mm-paste').onclick = async () => {
+    if (!State.mirror) return;
+    let text = $('mm-text').value;
+    if (!text) {
+      try { text = await navigator.clipboard.readText(); } catch (e) {}
+    }
+    if (!text) return toast('请先填写文本或复制内容到 PC 剪贴板', 'error');
+    if (State.mirror.fallback) return toast('粘贴需要实时投屏模式（快照模式无控制通道）', 'error');
+    if (State.mirror.pasteText(text)) toast('已写入手机剪贴板并执行粘贴（需焦点在输入框）', 'ok');
   };
   $('mm-clipboard').onclick = () => {
     const t = $('mm-text').value;
@@ -560,6 +636,30 @@ function openMirror(serial, opts = {}) {
       const r = await API.post(`/api/devices/${encodeURIComponent(serial)}/screenshot`);
       toast(`截图已保存: ${r.file}`, 'ok');
     } catch (e) { toast(e.message, 'error'); }
+  };
+  $('mm-record-video').onclick = () => {
+    if (videoRecorder) { videoRecorder.stop(); return; }
+    if (!canvas.captureStream) return toast('浏览器不支持录像', 'error');
+    const stream = canvas.captureStream(30);
+    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+      .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+    if (!mime) return toast('浏览器不支持 MediaRecorder', 'error');
+    videoChunks = [];
+    videoRecorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8000000 });
+    videoRecorder.ondataavailable = (e) => { if (e.data.size) videoChunks.push(e.data); };
+    videoRecorder.onstop = () => {
+      const blob = new Blob(videoChunks, { type: 'video/webm' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `narci_${serial}_${new Date().toISOString().replace(/[:.]/g, '-')}.webm`;
+      a.click();
+      videoRecorder = null;
+      $('mm-record-video').textContent = '⏺ 录像';
+      toast('录像已保存为 webm', 'ok');
+    };
+    videoRecorder.start(1000);
+    $('mm-record-video').textContent = '⏹ 停止录像';
+    toast('录像中…再次点击停止', 'info');
   };
 }
 

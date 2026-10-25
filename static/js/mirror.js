@@ -246,6 +246,13 @@ class Mirror {
 
   sendText(text) { this.inject('text', { text }); }
 
+  /* 中文等非 ASCII 文本: 写入设备剪贴板并立即执行粘贴（需手机焦点在输入框、实时投屏模式） */
+  pasteText(text) {
+    if (this.fallback || !this.ws || this.ws.readyState !== 1) return false;
+    this.ws.send(JSON.stringify({ action: 'set_clipboard', text, paste: true }));
+    return true;
+  }
+
   setClipboard(text) {
     if (this.ws && this.ws.readyState === 1) {
       this.ws.send(JSON.stringify({ action: 'set_clipboard', text }));

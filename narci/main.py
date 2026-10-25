@@ -22,6 +22,7 @@ from .scrcpy_protocol import encode_set_clipboard
 
 _wm_size_cache: dict[str, tuple[float, tuple[int, int]]] = {}
 _info_fetch_at: dict[str, float] = {}
+_wifi_retry_at: dict[str, float] = {}
 _background: list[asyncio.Task] = []
 
 
@@ -100,6 +101,20 @@ async def refresh_devices() -> int:
             except Exception as e:
                 bus.warn(f"读取设备信息失败 {serial}: {e}")
                 _info_fetch_at[serial] = time.time() - 240
+    # WiFi 设备自动重连: 注册表里的无线设备(序列号含 ":")掉线时每 60s 尝试一次
+    now = time.time()
+    for row in db.list_devices(include_disabled=False):
+        serial = row["serial"]
+        if ":" not in serial or serial in online:
+            continue
+        if now - _wifi_retry_at.get(serial, 0) < 60:
+            continue
+        _wifi_retry_at[serial] = now
+        try:
+            out = await adb.connect(serial)
+            bus.info(f"WiFi 重连 {serial}: {out}")
+        except Exception as e:
+            bus.warn(f"WiFi 重连失败 {serial}: {e}")
     return len(online)
 
 
@@ -178,6 +193,32 @@ async def api_scan_lan(body: dict = None):
 async def api_refresh():
     n = await refresh_devices()
     return {"online": n}
+
+
+# ---------- 应用管理 ----------
+
+@app.get("/api/devices/{serial}/apps")
+async def api_apps(serial: str):
+    apps = await adb.list_apps(serial)
+    return {"apps": apps}
+
+
+@app.post("/api/devices/{serial}/apps/{package}/launch")
+async def api_app_launch(serial: str, package: str):
+    await adb.launch_app(serial, package)
+    return {"ok": True}
+
+
+@app.post("/api/devices/{serial}/apps/{package}/stop")
+async def api_app_stop(serial: str, package: str):
+    await adb.stop_app(serial, package)
+    return {"ok": True}
+
+
+@app.post("/api/devices/{serial}/apps/{package}/uninstall")
+async def api_app_uninstall(serial: str, package: str):
+    out = await adb.uninstall_app(serial, package)
+    return {"ok": True, "out": out}
 
 
 @app.post("/api/devices/{serial}/disable")

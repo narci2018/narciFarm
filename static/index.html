@@ -45,6 +45,7 @@
       <button class="tab" data-tab="scenario">场景编排</button>
       <button class="tab" data-tab="schedule">定时调度</button>
       <button class="tab" data-tab="console">ADB 控制台</button>
+      <button class="tab" data-tab="apps">应用管理</button>
       <button class="tab" data-tab="captures">截图库</button>
       <button class="tab" data-tab="logs">日志</button>
     </nav>
@@ -151,6 +152,10 @@
               <option value="launch">launch 启动应用</option><option value="stop_app">stop_app 停止应用</option>
               <option value="wait">wait 等待</option><option value="shell">shell 命令</option>
               <option value="screenshot">screenshot 截图</option><option value="tap_text">tap_text 按文本点击</option>
+              <option value="wait_text">wait_text 等待文本出现</option>
+              <option value="assert_text">assert_text 文本存在性断言</option>
+              <option value="rand_wait">rand_wait 随机等待</option>
+              <option value="start_activity">start_activity 拉起Activity</option>
               <option value="loop">loop 循环</option>
             </select>
             <button id="sc-add" class="btn small">添加步骤</button>
@@ -208,6 +213,20 @@
       </div>
     </section>
 
+    <section id="tab-apps" class="tabpane">
+      <div class="pane-card">
+        <div class="form-row">
+          <label>设备</label><select id="am-device"></select>
+          <input id="am-search" placeholder="搜索包名">
+          <button id="am-reload" class="btn primary">加载应用列表</button>
+        </div>
+        <table class="data-table" id="am-table">
+          <thead><tr><th>#</th><th>包名</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
     <section id="tab-captures" class="tabpane">
       <div class="toolbar"><button id="cp-reload" class="btn">刷新</button></div>
       <div id="capture-grid" class="capture-grid"></div>
@@ -231,7 +250,9 @@
       <span class="spacer"></span>
       <input id="mm-text" placeholder="输入文本→发送 / 剪贴板">
       <button id="mm-send-text" class="btn small">输入</button>
+      <button id="mm-paste" class="btn small" title="文本含中文时自动走剪贴板粘贴路径">粘贴</button>
       <button id="mm-clipboard" class="btn small">存剪贴板</button>
+      <button id="mm-record-video" class="btn small">⏺ 录像</button>
       <button id="mm-shot" class="btn small">截图</button>
       <button id="mm-close" class="btn small danger">关闭</button>
     </div>

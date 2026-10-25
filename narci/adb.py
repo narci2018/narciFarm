@@ -302,18 +302,43 @@ def _find_node(root: ET.Element, text: str) -> Optional[ET.Element]:
 
 async def tap_text(serial: str, text: str, timeout: float = 25) -> tuple[int, int]:
     """通过 uiautomator dump 找到包含指定文本的节点并点击其中心。"""
+    center = await find_text(serial, text, timeout=timeout)
+    if center is None:
+        raise AdbError(f"未找到文本节点: {text}")
+    await input_tap(serial, center[0], center[1])
+    return center
+
+
+async def find_text(serial: str, text: str, timeout: float = 25) -> Optional[tuple[int, int]]:
+    """查找包含指定文本的控件中心坐标（先精确匹配 text/content-desc，再模糊包含）。"""
     await _run_ok(["shell", "uiautomator", "dump", "/data/local/tmp/narci_uidump.xml"],
                   device=serial, timeout=timeout)
     rc, xml_text = await shell(serial, "cat /data/local/tmp/narci_uidump.xml", timeout=15)
-    root = ET.fromstring(xml_text)
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
     node = _find_node(root, text)
     if node is None:
-        raise AdbError(f"未找到文本节点: {text}")
-    center = _parse_bounds(node.get("bounds", ""))
-    if not center:
-        raise AdbError(f"节点 {text} 无有效 bounds")
-    await input_tap(serial, center[0], center[1])
-    return center
+        return None
+    return _parse_bounds(node.get("bounds", ""))
+
+
+async def list_apps(serial: str) -> list[str]:
+    """列出第三方应用包名（pm list packages -3）。"""
+    out = await _run_ok(["shell", "pm", "list", "packages", "-3"], device=serial, timeout=30)
+    return sorted(line.strip()[8:] for line in out.decode("utf-8", "replace").splitlines()
+                  if line.strip().startswith("package:"))
+
+
+async def uninstall_app(serial: str, package: str) -> str:
+    out = await _run_ok(["shell", f"pm uninstall {shlex.quote(package)}"], device=serial, timeout=60)
+    return out.decode("utf-8", "replace").strip()
+
+
+async def start_activity(serial: str, component: str) -> None:
+    """直接拉起 Activity，component 形如 com.pkg/.MainActivity 或 com.pkg/com.pkg.MainActivity。"""
+    await _run_ok(["shell", f"am start -n {shlex.quote(component)}"], device=serial, timeout=20)
 
 
 async def get_current_focus(serial: str) -> str:

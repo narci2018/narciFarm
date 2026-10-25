@@ -4,6 +4,8 @@
 所有动作走 adb 控制面，投屏在线与否不影响执行。
 """
 import asyncio
+import contextlib
+import random
 import time
 import uuid
 from typing import Any, Optional
@@ -12,7 +14,8 @@ from . import adb, db
 from .events import bus
 
 STEP_TYPES = {"tap", "swipe", "text", "key", "back", "home", "launch", "stop_app",
-              "shell", "wait", "screenshot", "tap_text", "loop"}
+              "shell", "wait", "screenshot", "tap_text", "loop",
+              "wait_text", "assert_text", "rand_wait", "start_activity"}
 
 _runs: dict[str, dict] = {}
 _lock = asyncio.Lock()
@@ -105,6 +108,37 @@ async def _execute_step(step: dict, serial: str, size: tuple[int, int],
     if stype == "tap_text":
         cx, cy = await adb.tap_text(serial, str(step["text"]))
         return {"center": (cx, cy)}
+    if stype == "wait_text":
+        text = str(step["text"])
+        timeout = float(step.get("timeout_ms", 10000)) / 1000.0
+        interval = max(float(step.get("interval_ms", 1000)) / 1000.0, 0.5)
+        deadline = time.time() + timeout
+        while True:
+            center = await adb.find_text(serial, text)
+            if center:
+                return {"found": center}
+            if time.time() >= deadline:
+                raise ScenarioError(f"等待文本超时({timeout:.0f}s): {text}")
+            await asyncio.sleep(interval)
+    if stype == "assert_text":
+        text = str(step["text"])
+        expect = str(step.get("expect", "exists"))
+        center = await adb.find_text(serial, text)
+        if expect == "exists" and center is None:
+            raise ScenarioError(f"断言失败: 未找到文本 {text}")
+        if expect == "absent" and center is not None:
+            raise ScenarioError(f"断言失败: 文本仍存在 {text}")
+        return {"expect": expect, "met": True}
+    if stype == "rand_wait":
+        lo = float(step.get("min_ms", 500))
+        hi = max(float(step.get("max_ms", 2000)), lo)
+        ms = random.uniform(lo, hi)
+        await asyncio.sleep(ms / 1000.0)
+        return {"ms": round(ms)}
+    if stype == "start_activity":
+        comp = str(step["component"])
+        await adb.start_activity(serial, comp)
+        return {"component": comp}
     raise ScenarioError(f"未实现步骤: {stype}")
 
 
@@ -150,7 +184,18 @@ async def _run_step_list(steps: list, serial: str, size: tuple[int, int],
             continue
         state["current"] = i + 1
         started = time.time()
-        result = await _execute_step(step, serial, size, run_id)
+        try:
+            result = await _execute_step(step, serial, size, run_id)
+        except (ScenarioError, adb.AdbError):
+            # 失败自动截图取证（尽力而为）
+            with contextlib.suppress(Exception):
+                from .config import CAPTURES_DIR
+                data = await adb.screenshot_bytes(serial)
+                path = CAPTURES_DIR / "auto" / f"{serial}_{int(time.time() * 1000)}.png"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+                state["failure_shot"] = str(path)
+            raise
         bus.publish("info",
                     f"场景运行[{run_id[:8]}] {serial} 步骤{i + 1}/{len(steps)} {step['type']} "
                     f"耗时{time.time() - started:.2f}s",

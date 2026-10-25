@@ -12,6 +12,10 @@ const STEP_FIELDS = {
   shell: [['cmd', '命令'], ['timeout', '超时s']],
   screenshot: [['name', '文件名(可选)']],
   tap_text: [['text', '要点击的文本']],
+  wait_text: [['text', '等待出现的文本'], ['timeout_ms', '超时ms'], ['interval_ms', '轮询间隔ms']],
+  assert_text: [['text', '文本'], ['expect', 'exists(须存在) / absent(须不存在)']],
+  rand_wait: [['min_ms', '最小ms'], ['max_ms', '最大ms']],
+  start_activity: [['component', 'com.pkg/.MainActivity']],
   loop: [['count', '次数']],
 };
 
@@ -60,6 +64,7 @@ const ScenarioEditor = {
 
   _summarize(step) {
     if (step.type === 'loop') return `循环 ${step.count} 次, ${step.steps.length} 个子步骤`;
+    if (step.type === 'assert_text') return `${step.expect === 'absent' ? '须不存在' : '须存在'}: ${step.text}`;
     return Object.entries(step).filter(([k]) => k !== 'type')
       .map(([k, v]) => `${k}=${v}`).join(', ');
   },
