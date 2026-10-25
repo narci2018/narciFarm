@@ -181,7 +181,12 @@ class ScrcpyClient:
                 if not line:
                     break
                 text = line.decode("utf-8", "replace").strip()
-                if text:
+                if not text:
+                    continue
+                low = text.lower()
+                if any(k in low for k in ("error", "exception", "could not inject", "denied", "security")):
+                    bus.error(f"[{self.serial}][server] {text}  ← 若为注入被拒，多为厂商安全限制(如MIUI「USB调试(安全设置)」)")
+                else:
                     bus.warn(f"[{self.serial}][server] {text}")
             rc = await self._proc.wait()
             if rc not in (0, -15, 130) and not self._closing:
@@ -265,12 +270,13 @@ class ScrcpyClient:
 
 
 class StreamHub:
-    """多设备投屏会话管理（引用计数，最后一个使用者断开后关闭）。"""
+    """多设备投屏会话管理（引用计数 + 观看者扇出，支持同一设备多窗口观看）。"""
 
     def __init__(self) -> None:
         self._clients: dict[str, ScrcpyClient] = {}
         self._refs: dict[str, int] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._subscribers: dict[str, set] = {}
 
     def _lock(self, serial: str) -> asyncio.Lock:
         if serial not in self._locks:
@@ -280,6 +286,18 @@ class StreamHub:
     def get(self, serial: str) -> Optional[ScrcpyClient]:
         return self._clients.get(serial)
 
+    def refs(self, serial: str) -> int:
+        return self._refs.get(serial, 0)
+
+    def subscribe(self, serial: str) -> asyncio.Queue:
+        """注册一个观看者队列；客户端回调会把会话/帧数据扇出到所有队列。"""
+        q: asyncio.Queue = asyncio.Queue(maxsize=240)
+        self._subscribers.setdefault(serial, set()).add(q)
+        return q
+
+    def unsubscribe(self, serial: str, q: asyncio.Queue) -> None:
+        self._subscribers.get(serial, set()).discard(q)
+
     async def acquire(self, serial: str, **kwargs) -> ScrcpyClient:
         async with self._lock(serial):
             client = self._clients.get(serial)
@@ -288,11 +306,36 @@ class StreamHub:
                 return client
             client = ScrcpyClient(serial, **kwargs)
 
+            def _fanout(item: tuple) -> None:
+                for q in list(self._subscribers.get(serial, ())):
+                    try:
+                        q.put_nowait(item)
+                    except asyncio.QueueFull:
+                        pass  # 慢观看者丢帧，不影响其他观看者
+
+            async def _on_session(w: int, h: int) -> None:
+                _fanout(("json", {"type": "session", "width": w, "height": h}))
+
+            async def _on_config(payload: bytes) -> None:
+                _fanout(("bin", b"\x03" + payload))
+
+            async def _on_frame(pts: int, key_frame: bool, payload: bytes) -> None:
+                _fanout(("bin", b"\x01" + struct.pack(">BQ", 1 if key_frame else 0, pts) + payload))
+
+            client.on_session = _on_session
+            client.on_config = _on_config
+            client.on_frame = _on_frame
+
             async def _closed(reason: str) -> None:
                 async with self._lock(serial):
                     if self._clients.get(serial) is client:
                         self._clients.pop(serial, None)
                         self._refs.pop(serial, None)
+                    for q in list(self._subscribers.pop(serial, ())):
+                        try:
+                            q.put_nowait(("json", {"type": "error", "msg": f"投屏会话结束: {reason}"}))
+                        except asyncio.QueueFull:
+                            pass
 
             client.on_closed = _closed
             await client.start()
@@ -318,6 +361,7 @@ class StreamHub:
                 await client.stop("服务关闭")
         self._clients.clear()
         self._refs.clear()
+        self._subscribers.clear()
 
 
 hub = StreamHub()

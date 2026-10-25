@@ -451,69 +451,66 @@ async def ws_mirror(ws: WebSocket, serial: str):
     try:
         client = await hub.acquire(serial, control=control)
     except (ScrcpyClientError, adb.AdbError) as e:
+        bus.error(f"[{serial}] 投屏连接失败: {e}")
         await ws.send_json({"type": "error", "msg": str(e)})
         await ws.close()
         return
 
-    queue: asyncio.Queue = asyncio.Queue(maxsize=120)
-
-    def _pkt(kind: bytes, payload: bytes) -> bytes:
-        return kind + payload
-
-    async def _on_session(w: int, h: int) -> None:
-        with suppress(asyncio.QueueFull):
-            queue.put_nowait(("json", {"type": "session", "width": w, "height": h}))
-
-    async def _on_config(payload: bytes) -> None:
-        with suppress(asyncio.QueueFull):
-            queue.put_nowait(("bin", _pkt(b"\x03", payload)))
-
-    async def _on_frame(pts: int, key_frame: bool, payload: bytes) -> None:
-        import struct as _s
-        with suppress(asyncio.QueueFull):
-            queue.put_nowait(("bin", _pkt(b"\x01", _s.pack(">BQ", 1 if key_frame else 0, pts) + payload)))
-
-    async def _writer() -> None:
-        while True:
-            kind, data = await queue.get()
-            if kind == "json":
-                await ws.send_json(data)
-            else:
-                await ws.send_bytes(data)
-
-    client.on_session = _on_session
-    client.on_config = _on_config
-    client.on_frame = _on_frame
-    writer_task = asyncio.create_task(_writer())
+    queue = hub.subscribe(serial)
+    writer_task = asyncio.create_task(_mirror_writer(ws, queue))
     if client.width:
         await ws.send_json({"type": "session", "width": client.width, "height": client.height})
     await ws.send_json({"type": "device", "name": client.device_name,
                         "fps": round(client.fps(), 1)})
+    bus.info(f"[{serial}] 投屏连接打开 (control={control}, 观看者={hub.refs(serial)})")
 
     try:
         while True:
             msg = await ws.receive()
             if msg["type"] == "websocket.disconnect":
                 break
-            if msg["type"] != "websocket.text":
+            # ASGI 文本帧: type 恒为 "websocket.receive"，负载在 "text" 键
+            text = msg.get("text")
+            if text is None:
                 continue
-            data = json.loads(msg["text"])
-            await _handle_ws_command(ws, client, data)
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                bus.warn(f"[{serial}] 非法 WS 指令(非JSON): {text[:100]!r}")
+                continue
+            try:
+                await _handle_ws_command(ws, client, data)
+            except Exception as e:  # noqa: BLE001 - 注入失败必须呈现给前端而非断流
+                bus.error(f"[{serial}] 处理指令 {data.get('action')} 失败: {type(e).__name__}: {e}")
+                with suppress(Exception):
+                    await ws.send_json({"type": "error", "msg": f"注入失败: {e}"})
     except WebSocketDisconnect:
         pass
     finally:
+        hub.unsubscribe(serial, queue)
         writer_task.cancel()
-        client.on_session = client.on_config = client.on_frame = None
+        bus.info(f"[{serial}] 投屏连接关闭")
         await hub.release(serial)
+
+
+async def _mirror_writer(ws: WebSocket, queue: asyncio.Queue) -> None:
+    while True:
+        kind, data = await queue.get()
+        if kind == "json":
+            await ws.send_json(data)
+        else:
+            await ws.send_bytes(data)
 
 
 async def _handle_ws_command(ws: WebSocket, client: ScrcpyClient, data: dict) -> None:
     """前端命令统一入口。targets 缺省为当前投屏设备；群控广播时由前端携带完整目标列表。
 
     快速路径：主控设备若有控制通道则走 scrcpy 注入（低延迟）；其余设备走 adb。
+    每条指令与每次注入均写日志（网页「日志」页与 data/narciFarm.log 可查）。
     """
     action = data.get("action")
     targets = data.get("targets") or [client.serial]
+    bus.info(f"[{client.serial}] 指令 {action} 参数={json.dumps(data, ensure_ascii=False)[:160]} 目标={targets}")
 
     if action == "tap":
         nx, ny = float(data.get("nx", 0)), float(data.get("ny", 0))
@@ -522,8 +519,11 @@ async def _handle_ws_command(ws: WebSocket, client: ScrcpyClient, data: dict) ->
                 x, y = int(nx * client.width), int(ny * client.height)
                 await client.send_control(encode_inject_touch(ACTION_DOWN, x, y, client.width, client.height))
                 await client.send_control(encode_inject_touch(ACTION_UP, x, y, client.width, client.height, 0.0))
+                bus.info(f"[{serial}] 注入[scrcpy] tap ({x},{y}) 坐标系({client.width}x{client.height})")
             else:
                 await _input_action(serial, "tap", {"x_pct": nx, "y_pct": ny})
+                bus.info(f"[{serial}] 注入[adb] tap ({nx:.3f},{ny:.3f})")
+        await _ack(ws, "tap", targets)
         return
 
     if action == "swipe":
@@ -543,10 +543,13 @@ async def _handle_ws_command(ws: WebSocket, client: ScrcpyClient, data: dict) ->
                         ACTION_MOVE, int(x1 + (x2 - x1) * t), int(y1 + (y2 - y1) * t),
                         client.width, client.height))
                 await client.send_control(encode_inject_touch(ACTION_UP, x2, y2, client.width, client.height))
+                bus.info(f"[{serial}] 注入[scrcpy] swipe ({x1},{y1})->({x2},{y2}) {dur}ms")
             else:
                 await _input_action(serial, "swipe", {
                     "x_pct": nx1, "y_pct": ny1, "x2_pct": nx2, "y2_pct": ny2,
                     "duration_ms": dur})
+                bus.info(f"[{serial}] 注入[adb] swipe ({nx1:.3f},{ny1:.3f})->({nx2:.3f},{ny2:.3f}) {dur}ms")
+        await _ack(ws, "swipe", targets)
         return
 
     if action == "scroll":
@@ -556,6 +559,7 @@ async def _handle_ws_command(ws: WebSocket, client: ScrcpyClient, data: dict) ->
         if client.control_enabled and client.running:
             x, y = int(nx * client.width), int(ny * client.height)
             await client.send_control(encode_inject_scroll(x, y, client.width, client.height, 0.0, delta))
+            bus.info(f"[{client.serial}] 注入[scrcpy] scroll ({x},{y}) delta={delta}")
         else:
             size = await _screen_size(client.serial)
             w, h = size or (0, 0)
@@ -563,29 +567,43 @@ async def _handle_ws_command(ws: WebSocket, client: ScrcpyClient, data: dict) ->
                 cy = int(ny * h)
                 dy = int(h * 0.15) * (1 if delta < 0 else -1)
                 await adb.input_swipe(client.serial, int(w / 2), cy, int(w / 2), cy + dy, 120)
+                bus.info(f"[{client.serial}] 注入[adb] scroll swipe delta={delta}")
+        await _ack(ws, "scroll", [client.serial])
         return
 
     if action == "key":
         targets = data.get("targets") or [client.serial]
         for serial in targets:
             await _input_action(serial, "key", {"keycode": str(data.get("keycode", ""))})
+            bus.info(f"[{serial}] 注入[adb] key {data.get('keycode')}")
+        await _ack(ws, "key", targets)
         return
 
     if action == "text":
         targets = data.get("targets") or [client.serial]
         for serial in targets:
             await _input_action(serial, "text", {"text": str(data.get("text", ""))})
+            bus.info(f"[{serial}] 注入[adb] text {str(data.get('text', ''))[:40]!r}")
+        await _ack(ws, "text", targets)
         return
 
     if action == "set_clipboard":
         if client.control_enabled and client.running:
             await client.send_control(encode_set_clipboard(str(data.get("text", "")), paste=bool(data.get("paste"))))
+            bus.info(f"[{client.serial}] 注入[scrcpy] set_clipboard {str(data.get('text', ''))[:40]!r}")
+        await _ack(ws, "set_clipboard", [client.serial])
         return
 
     if action == "stats":
         await ws.send_json({"type": "stats", "fps": round(client.fps(), 1),
                             "frames": client.frames, "width": client.width, "height": client.height})
         return
+
+
+async def _ack(ws: WebSocket, action: str, targets: list) -> None:
+    """指令处理完成回执：前端可据此确认链路通到后端。"""
+    with suppress(Exception):
+        await ws.send_json({"type": "injected", "action": action, "targets": targets})
 
 
 @app.post("/api/shutdown")

@@ -56,6 +56,7 @@ class Mirror {
         const d = JSON.parse(ev.data);
         if (d.type === 'session') this._onSession(d.width, d.height);
         else if (d.type === 'device') this.deviceName = d.name;
+        else if (d.type === 'injected') console.debug('[narci] 注入回执', d);
         else if (d.type === 'error') { toast(`投屏失败: ${d.msg}`, 'error'); this._startFallback(d.msg); }
         else if (d.type === 'stats') this.fps = d.fps;
       } else {
@@ -184,7 +185,10 @@ class Mirror {
   send(obj) {
     if (this.ws && this.ws.readyState === 1) {
       if (!obj.targets && this.opts.getTargets) obj.targets = this.opts.getTargets();
+      console.debug('[narci] 发送指令', obj);
       this.ws.send(JSON.stringify(obj));
+    } else {
+      console.warn('[narci] 指令未发送: WebSocket 未就绪', obj);
     }
   }
 
