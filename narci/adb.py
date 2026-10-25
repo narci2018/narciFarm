@@ -6,11 +6,16 @@ import asyncio
 import contextlib
 import re
 import shlex
+import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from typing import Optional
 
 from .config import ADB_PATH
 from .events import bus
+
+# 无控制台 exe 中 spawn 控制台子进程(adb)会弹出黑窗，必须加 CREATE_NO_WINDOW
+CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 class AdbError(Exception):
@@ -29,6 +34,7 @@ async def _run(args: list[str], timeout: float = 20, device: Optional[str] = Non
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE if input_data is not None else asyncio.subprocess.DEVNULL,
+            creationflags=CREATE_NO_WINDOW,
         )
     except FileNotFoundError:
         raise AdbError(f"找不到 adb: {ADB_PATH}（可用环境变量 NARCI_ADB 指定路径）")

@@ -122,6 +122,7 @@ class ScrcpyClient:
         self._proc = await asyncio.create_subprocess_exec(
             adb.ADB_PATH, "-s", self.serial, "shell", server_args,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            creationflags=adb.CREATE_NO_WINDOW,
         )
         self._tasks.append(asyncio.create_task(self._pump_server_logs()))
 
