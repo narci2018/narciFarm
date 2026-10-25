@@ -15,7 +15,10 @@ if sys.platform == "win32":
     lib_bin = os.path.join(sys.prefix, "Library", "bin")
     if os.path.isdir(lib_bin):
         for pattern in ("ffi*.dll", "libffi*.dll", "zlib*.dll", "liblzma*.dll",
-                        "libbz2*.dll", "sqlite3*.dll", "libcrypto*.dll", "libssl*.dll"):
+                        "libbz2*.dll", "sqlite3*.dll", "libcrypto*.dll", "libssl*.dll",
+                        "tiff*.dll", "jpeg*.dll", "libjpeg*.dll", "libpng*.dll",
+                        "libwebp*.dll", "libdeflate*.dll", "jbig*.dll", "lcms*.dll",
+                        "openjp*.dll", "libsharpyuv*.dll"):
             for p in _glob.glob(os.path.join(lib_bin, pattern)):
                 extra_binaries.append((p, "."))
 
@@ -40,10 +43,11 @@ hiddenimports = [
     "uvicorn.lifespan",
     "uvicorn.lifespan.on",
     "anyio._backends._asyncio",
+    "pystray._win32",
 ]
 
 excludes = [
-    "numpy", "tkinter", "matplotlib", "pandas", "scipy", "PIL",
+    "numpy", "tkinter", "matplotlib", "pandas", "scipy",
     "PyQt5", "PyQt6", "PySide2", "PySide6", "IPython", "jedi",
 ]
 
@@ -75,7 +79,7 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

@@ -78,10 +78,10 @@ jobs:
           body: |
             ## narciFarm ${{ github.ref_name }}
 
-            - **narciFarm-windows-x64.exe**：PC 端单文件程序（内置 adb 与 scrcpy-server，双击即用，数据目录在 exe 同级）
+            - **narciFarm-windows-x64.exe**：PC 端单文件程序（内置 adb 与 scrcpy-server）。无控制台窗口，启动后以系统托盘图标常驻（打开管理台 / 关闭服务），数据与日志在 exe 同级目录
             - **scrcpy-server-${{ env.SCRCPY_VERSION }}**：安卓端被控服务（本仓库 CI 从 [scrcpy v${{ env.SCRCPY_VERSION }}](https://github.com/Genymobile/scrcpy) 源码构建的 dex jar，与 exe 内置的官方预编译版同版本，可互换）
 
-            使用：运行 exe 后浏览器自动打开管理台；手机开启 USB 调试即可被识别。
+            使用：运行 exe 后浏览器自动打开管理台；手机开启 USB 调试即可被识别。关闭：托盘图标右键 → 关闭服务。
           fail_on_unmatched_files: true
 
   build-android-server:

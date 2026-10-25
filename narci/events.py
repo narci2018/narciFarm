@@ -1,10 +1,40 @@
-"""进程内事件总线：日志环形缓冲 + WebSocket 订阅分发。"""
+"""进程内事件总线：日志环形缓冲 + 文件落盘 + WebSocket 订阅分发。"""
 import asyncio
+import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import AsyncIterator
 
+from .config import DATA_DIR
+
 _RING_SIZE = 800
+_LOG_FILE = DATA_DIR / "narciFarm.log"
+_LOG_ROTATE_BYTES = 5 * 1024 * 1024
+_file_lock = threading.Lock()
+
+
+def _rotate_if_needed() -> None:
+    try:
+        if _LOG_FILE.exists() and _LOG_FILE.stat().st_size > _LOG_ROTATE_BYTES:
+            old = _LOG_FILE.with_suffix(".log.old")
+            if old.exists():
+                old.unlink()
+            _LOG_FILE.rename(old)
+    except OSError:
+        pass
+
+
+def _append_file(line: str) -> None:
+    with _file_lock:
+        try:
+            with open(_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+
+_rotate_if_needed()
 
 
 class EventBus:
@@ -15,6 +45,8 @@ class EventBus:
     def publish(self, level: str, msg: str, **extra) -> dict:
         event = {"ts": time.time(), "level": level, "msg": msg, **extra}
         self._ring.append(event)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(event["ts"]))
+        _append_file(f"[{stamp}] [{level}] {msg}")
         for q in list(self._subscribers):
             try:
                 q.put_nowait(event)
