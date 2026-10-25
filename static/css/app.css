@@ -112,7 +112,13 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
 .mirror-bar .chk, .mirror-subbar .chk { color: var(--dim); }
 #mm-title { font-weight: 600; }
 .mirror-stage { display: flex; justify-content: center; background: #000; border-radius: 8px;
-  max-height: 74vh; overflow: hidden; }
+  max-height: 74vh; overflow: hidden; position: relative; }
+.ripple { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px;
+  border: 2px solid #4da3ff; border-radius: 50%; pointer-events: none; z-index: 5;
+  animation: rip .55s ease-out forwards; }
+@keyframes rip { from { transform: scale(.4); opacity: .95; } to { transform: scale(5); opacity: 0; } }
+#mm-inject-status.ok { color: var(--ok); }
+#mm-inject-status.bad { color: var(--bad); }
 #mm-canvas { max-height: 74vh; max-width: 92vw; background: #000; cursor: crosshair; }
 
 .toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column;

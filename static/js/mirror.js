@@ -1,7 +1,11 @@
-/* 投屏组件：WebSocket + WebCodecs(H.264/AVCC) 解码渲染 + 触控手势
+/* 投屏组件（v0.3.0 重构）：
+ * - 视频: WS 单向推流 → WebCodecs 解码（失败自动退化快照轮询）
+ * - 操作: 统一走 HTTP /api/input（与批量/群发同一条可靠路径，逐台留痕）
+ * - 反馈: 点击处涟漪标记 + 状态行 + 控制台，链路任一环断开都可见
+ *
  * 服务端二进制消息: [0x01][key u8][pts u64][AVCC payload] 帧 | [0x03][config payload]
  * 文本 JSON: {type:"session"|"device"|"error"|"stats", ...}
- * 支持 WebCodecs 不可用时自动退化为快照轮询模式。 */
+ */
 
 function splitAvcc(payload) {
   const nals = [];
@@ -24,13 +28,43 @@ function buildAvcC(sps, pps) {
   return new Uint8Array(out).buffer;
 }
 
+function rippleAt(stage, clientX, clientY) {
+  const r = stage.getBoundingClientRect();
+  const el = document.createElement('div');
+  el.className = 'ripple';
+  el.style.left = (clientX - r.left) + 'px';
+  el.style.top = (clientY - r.top) + 'px';
+  stage.appendChild(el);
+  setTimeout(() => el.remove(), 550);
+}
+
+/* 统一注入入口: HTTP, 无状态, 逐台回执 */
+async function sendInput(targets, action, params, onFeedback) {
+  console.debug('[narci] 发送注入', { action, params, targets });
+  try {
+    const r = await API.post('/api/input', { serials: targets, action, params });
+    if (onFeedback) onFeedback(action, targets, r);
+    if (r && r.ok === false) {
+      const failed = Object.entries(r.results || {}).filter(([, v]) => !v.ok);
+      toast(`注入失败: ${failed.map(([s, v]) => `${s}: ${v.error}`).join('；').slice(0, 160)}`, 'error', 6000);
+    }
+    return r;
+  } catch (e) {
+    toast(`注入请求失败: ${e.message}`, 'error', 6000);
+    if (onFeedback) onFeedback(action, targets, { ok: false, error: e.message });
+    return null;
+  }
+}
+
 class Mirror {
   /**
-   * @param opts {getTargets:()=>string[], onGesture:(step)=>void, recording:()=>bool}
+   * @param opts {getTargets:()=>string[], onGesture:(step)=>void, recording:()=>bool,
+   *              onInjectFeedback:(action,targets,results)=>void}
    */
   constructor(serial, canvas, opts = {}) {
     this.serial = serial;
     this.canvas = canvas;
+    this.stage = canvas.parentElement;
     this.ctx = canvas.getContext('2d');
     this.opts = opts;
     this.ws = null;
@@ -40,8 +74,17 @@ class Mirror {
     this.frames = 0; this.dropped = 0;
     this.fps = 0; this._fpsWin = [];
     this.closed = false;
-    this.fallback = null;   // SnapshotMirror
+    this.fallback = null;
     this._gesture = null;
+  }
+
+  targets() {
+    if (this.opts.getTargets) return this.opts.getTargets();
+    return [this.serial];
+  }
+
+  inject(action, params) {
+    return sendInput(this.targets(), action, params, this.opts.onInjectFeedback);
   }
 
   async connect() {
@@ -56,8 +99,7 @@ class Mirror {
         const d = JSON.parse(ev.data);
         if (d.type === 'session') this._onSession(d.width, d.height);
         else if (d.type === 'device') this.deviceName = d.name;
-        else if (d.type === 'injected') console.debug('[narci] 注入回执', d);
-        else if (d.type === 'error') { toast(`投屏失败: ${d.msg}`, 'error'); this._startFallback(d.msg); }
+        else if (d.type === 'error') { toast(`投屏提示: ${d.msg}`, 'error', 6000); this._startFallback(d.msg); }
         else if (d.type === 'stats') this.fps = d.fps;
       } else {
         this._onBinary(ev.data);
@@ -82,7 +124,7 @@ class Mirror {
       this._configure(u8.subarray(1));
       return;
     }
-    if (t !== 1) return;                 // 0x02 预留
+    if (t !== 1) return;
     if (!this.configured || !this.decoder || this.decoder.state !== 'configured') {
       this.dropped++; return;
     }
@@ -134,10 +176,11 @@ class Mirror {
     this.fps = (this._fpsWin.length / 2).toFixed(1);
   }
 
-  // ---------- 输入 ----------
+  // ---------- 输入: 全部经 HTTP /api/input ----------
 
   _bindInput() {
     const cv = this.canvas;
+    cv.style.touchAction = 'none';
     cv.oncontextmenu = (e) => e.preventDefault();
 
     cv.addEventListener('pointerdown', (e) => {
@@ -149,8 +192,7 @@ class Mirror {
     cv.addEventListener('pointermove', (e) => {
       if (!this._gesture) return;
       const { nx, ny } = this._norm(e);
-      const dx = nx - this._gesture.x0, dy = ny - this._gesture.y0;
-      if (Math.hypot(dx, dy) > 0.012) this._gesture.moved = true;
+      if (Math.hypot(nx - this._gesture.x0, ny - this._gesture.y0) > 0.012) this._gesture.moved = true;
       this._gesture.x1 = nx; this._gesture.y1 = ny;
     });
     cv.addEventListener('pointerup', (e) => {
@@ -158,19 +200,28 @@ class Mirror {
       const g = this._gesture; this._gesture = null;
       const { nx, ny } = this._norm(e);
       const dur = Math.max(60, Math.round(performance.now() - g.t0));
+      rippleAt(this.stage, e.clientX, e.clientY);
       if (g.moved) {
-        this.send({ action: 'swipe', nx1: g.x0, ny1: g.y0, nx2: nx, ny2: ny, duration_ms: dur });
+        this.inject('swipe', {
+          x_pct: +g.x0.toFixed(4), y_pct: +g.y0.toFixed(4),
+          x2_pct: +nx.toFixed(4), y2_pct: +ny.toFixed(4), duration_ms: dur,
+        });
         this._record({ type: 'swipe', x_pct: +g.x0.toFixed(4), y_pct: +g.y0.toFixed(4), x2_pct: +nx.toFixed(4), y2_pct: +ny.toFixed(4), duration_ms: dur });
       } else {
-        this.send({ action: 'tap', nx: +nx.toFixed(4), ny: +ny.toFixed(4) });
+        this.inject('tap', { x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) });
         this._record({ type: 'tap', x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) });
       }
     });
     cv.addEventListener('wheel', (e) => {
       e.preventDefault();
       const { nx, ny } = this._norm(e);
-      const delta = e.deltaY < 0 ? 1.0 : -1.0;
-      this.send({ action: 'scroll', nx, ny, delta });
+      const dir = e.deltaY < 0 ? -1 : 1;   // 上滚 = 内容上移
+      const dy = dir * 0.18;
+      this.inject('swipe', {
+        x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4),
+        x2_pct: +nx.toFixed(4), y2_pct: +Math.max(0, Math.min(1, ny + dy)).toFixed(4),
+        duration_ms: 120,
+      });
     }, { passive: false });
   }
 
@@ -182,16 +233,6 @@ class Mirror {
     };
   }
 
-  send(obj) {
-    if (this.ws && this.ws.readyState === 1) {
-      if (!obj.targets && this.opts.getTargets) obj.targets = this.opts.getTargets();
-      console.debug('[narci] 发送指令', obj);
-      this.ws.send(JSON.stringify(obj));
-    } else {
-      console.warn('[narci] 指令未发送: WebSocket 未就绪', obj);
-    }
-  }
-
   _record(step) {
     if (this.opts.recording && this.opts.recording() && this.opts.onGesture) {
       this.opts.onGesture(step);
@@ -199,17 +240,27 @@ class Mirror {
   }
 
   key(nameOrCode) {
-    this.send({ action: 'key', keycode: String(nameOrCode) });
+    this.inject('key', { keycode: String(nameOrCode) });
     this._record({ type: 'key', keycode: String(nameOrCode) });
   }
 
-  sendText(text) { this.send({ action: 'text', text }); }
+  sendText(text) { this.inject('text', { text }); }
 
-  setClipboard(text) { this.send({ action: 'set_clipboard', text }); }
+  setClipboard(text) {
+    if (this.ws && this.ws.readyState === 1) {
+      this.ws.send(JSON.stringify({ action: 'set_clipboard', text }));
+    }
+  }
 
   requestStats() { this.send({ action: 'stats' }); }
 
-  // ---------- 降级：快照轮询 ----------
+  send(obj) {
+    if (this.ws && this.ws.readyState === 1) {
+      this.ws.send(JSON.stringify(obj));
+    }
+  }
+
+  // ---------- 降级: 快照轮询(操作同样走 HTTP) ----------
 
   _startFallback(reason) {
     if (this.fallback || this.closed) return;
@@ -231,6 +282,7 @@ class Mirror {
 class SnapshotMirror {
   constructor(serial, canvas, opts = {}) {
     this.serial = serial; this.canvas = canvas; this.opts = opts;
+    this.stage = canvas.parentElement;
     this.img = new Image();
     this.timer = null;
     this.gesture = null;
@@ -260,6 +312,7 @@ class SnapshotMirror {
   }
   _bind() {
     const cv = this.canvas;
+    cv.style.touchAction = 'none';
     cv.oncontextmenu = (e) => e.preventDefault();
     cv.onpointerdown = (e) => {
       cv.setPointerCapture(e.pointerId);
@@ -272,25 +325,27 @@ class SnapshotMirror {
       if (Math.hypot(nx - this.gesture.x0, ny - this.gesture.y0) > 0.02) this.gesture.moved = true;
       this.gesture.x1 = nx; this.gesture.y1 = ny;
     };
-    cv.onpointerup = async (e) => {
+    cv.onpointerup = (e) => {
       if (!this.gesture) return;
       const g = this.gesture; this.gesture = null;
       const { nx, ny } = this._norm(e);
       const dur = Math.max(60, Math.round(performance.now() - g.t0));
-      try {
-        if (g.moved) {
-          const r = await API.post(`/api/devices/${encodeURIComponent(this.serial)}/input`,
-            { action: 'swipe', params: { x_pct: g.x0, y_pct: g.y0, x2_pct: nx, y2_pct: ny, duration_ms: dur } });
-          if (r && r.ok === false) { toast(r.error, 'error', 6000); return; }
-          this._record({ type: 'swipe', x_pct: +g.x0.toFixed(4), y_pct: +g.y0.toFixed(4), x2_pct: +nx.toFixed(4), y2_pct: +ny.toFixed(4), duration_ms: dur });
-        } else {
-          const r = await API.post(`/api/devices/${encodeURIComponent(this.serial)}/input`,
-            { action: 'tap', params: { x_pct: nx, y_pct: ny } });
-          if (r && r.ok === false) { toast(r.error, 'error', 6000); return; }
-          this._record({ type: 'tap', x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) });
-        }
-      } catch (err) { toast(err.message, 'error'); }
+      rippleAt(this.stage, e.clientX, e.clientY);
+      if (g.moved) {
+        sendInput(this.targets(), 'swipe', {
+          x_pct: +g.x0.toFixed(4), y_pct: +g.y0.toFixed(4),
+          x2_pct: +nx.toFixed(4), y2_pct: +ny.toFixed(4), duration_ms: dur,
+        }, this.opts.onInjectFeedback);
+        this._record({ type: 'swipe', x_pct: +g.x0.toFixed(4), y_pct: +g.y0.toFixed(4), x2_pct: +nx.toFixed(4), y2_pct: +ny.toFixed(4), duration_ms: dur });
+      } else {
+        sendInput(this.targets(), 'tap', { x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) }, this.opts.onInjectFeedback);
+        this._record({ type: 'tap', x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) });
+      }
     };
+  }
+  targets() {
+    if (this.opts.getTargets) return this.opts.getTargets();
+    return [this.serial];
   }
   _record(step) {
     if (this.opts.recording && this.opts.recording() && this.opts.onGesture) this.opts.onGesture(step);

@@ -512,6 +512,17 @@ function openMirror(serial, opts = {}) {
       ScenarioEditor.render();
     },
     onFallback: (reason) => { recInd.textContent = `快照模式(${reason.slice(0, 20)})`; },
+    onInjectFeedback: (action, targets, results) => {
+      const st = $('mm-inject-status');
+      if (!st) return;
+      if (results && results.ok) {
+        st.textContent = `✓ ${action} → ${targets.length} 台`;
+        st.className = 'hint ok';
+      } else {
+        st.textContent = `✗ ${action} 失败（详见日志页）`;
+        st.className = 'hint bad';
+      }
+    },
   });
   State.mirror.connect();
 

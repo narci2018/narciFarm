@@ -18,9 +18,7 @@ from .config import (CAPTURES_DIR, DEVICE_REFRESH_INTERVAL, HOST, MAX_FPS,
                      UPLOADS_DIR, VIDEO_BITRATE)
 from .events import bus
 from .scrcpy_client import ScrcpyClient, ScrcpyClientError, hub
-from .scrcpy_protocol import (ACTION_DOWN, ACTION_MOVE, ACTION_UP,
-                              encode_inject_scroll, encode_inject_touch,
-                              encode_set_clipboard)
+from .scrcpy_protocol import encode_set_clipboard
 
 _wm_size_cache: dict[str, tuple[float, tuple[int, int]]] = {}
 _info_fetch_at: dict[str, float] = {}
@@ -207,6 +205,38 @@ async def api_shell(serial: str, body: dict):
     timeout = float(body.get("timeout", 20))
     rc, out = await adb.shell(serial, cmd, timeout=timeout)
     return {"rc": rc, "out": out}
+
+
+@app.post("/api/input")
+async def api_input_multi(body: dict):
+    """统一交互注入入口（重构后 PC 操作手机的唯一链路）。
+
+    body: {serials: [...], action: tap|swipe|text|key, params: {...}}
+    全部走 adb 控制面（与批量操作/群发同一条已被验证的路径），逐台执行并记录日志。
+    """
+    serials = body.get("serials") or []
+    action = body.get("action")
+    params = body.get("params", {})
+    if not serials:
+        raise HTTPException(400, "未指定目标设备")
+    if action not in ("tap", "swipe", "text", "key"):
+        raise HTTPException(400, f"不支持的操作: {action}")
+
+    async def one(serial: str) -> dict:
+        try:
+            await _input_action(serial, action, params)
+            bus.info(f"[{serial}] 注入[adb] {action} {json.dumps(params, ensure_ascii=False)[:100]}")
+            return {"ok": True}
+        except adb.AdbError as e:
+            bus.error(f"[{serial}] 注入失败: {e}")
+            return {"ok": False, "error": str(e)}
+        except Exception as e:  # noqa: BLE001
+            bus.error(f"[{serial}] 注入异常: {type(e).__name__}: {e}")
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    pairs = await asyncio.gather(*(one(s) for s in serials))
+    results = dict(zip(serials, pairs))
+    return {"ok": all(r["ok"] for r in results.values()), "results": results}
 
 
 @app.post("/api/devices/{serial}/input")
@@ -512,107 +542,27 @@ async def _mirror_writer(ws: WebSocket, queue: asyncio.Queue) -> None:
 
 
 async def _handle_ws_command(ws: WebSocket, client: ScrcpyClient, data: dict) -> None:
-    """前端命令统一入口。targets 缺省为当前投屏设备；群控广播时由前端携带完整目标列表。
+    """WS 仅承载视频与少量辅助命令。交互注入统一走 HTTP /api/input（与批量同路，可靠且全量留痕）。
 
-    快速路径：主控设备若有控制通道则走 scrcpy 注入（低延迟）；其余设备走 adb。
-    每条指令与每次注入均写日志（网页「日志」页与 data/narciFarm.log 可查）。
+    保留: stats(前端帧率显示) / set_clipboard(走 scrcpy 控制通道)。
     """
     action = data.get("action")
-    targets = data.get("targets") or [client.serial]
-    bus.info(f"[{client.serial}] 指令 {action} 参数={json.dumps(data, ensure_ascii=False)[:160]} 目标={targets}")
-
-    if action == "tap":
-        nx, ny = float(data.get("nx", 0)), float(data.get("ny", 0))
-        for serial in targets:
-            if serial == client.serial and client.control_enabled and client.running:
-                x, y = int(nx * client.width), int(ny * client.height)
-                await client.send_control(encode_inject_touch(ACTION_DOWN, x, y, client.width, client.height))
-                await client.send_control(encode_inject_touch(ACTION_UP, x, y, client.width, client.height, 0.0))
-                bus.info(f"[{serial}] 注入[scrcpy] tap ({x},{y}) 坐标系({client.width}x{client.height})")
-            else:
-                await _input_action(serial, "tap", {"x_pct": nx, "y_pct": ny})
-                bus.info(f"[{serial}] 注入[adb] tap ({nx:.3f},{ny:.3f})")
-        await _ack(ws, "tap", targets)
-        return
-
-    if action == "swipe":
-        nx1, ny1 = float(data.get("nx1", 0)), float(data.get("ny1", 0))
-        nx2, ny2 = float(data.get("nx2", 0)), float(data.get("ny2", 0))
-        dur = int(data.get("duration_ms", 200))
-        for serial in targets:
-            if serial == client.serial and client.control_enabled and client.running and dur <= 400:
-                x1, y1 = int(nx1 * client.width), int(ny1 * client.height)
-                x2, y2 = int(nx2 * client.width), int(ny2 * client.height)
-                await client.send_control(encode_inject_touch(ACTION_DOWN, x1, y1, client.width, client.height))
-                steps_n = 5
-                for i in range(1, steps_n + 1):
-                    t = i / steps_n
-                    await asyncio.sleep(max(dur / 1000.0 / steps_n, 0.01))
-                    await client.send_control(encode_inject_touch(
-                        ACTION_MOVE, int(x1 + (x2 - x1) * t), int(y1 + (y2 - y1) * t),
-                        client.width, client.height))
-                await client.send_control(encode_inject_touch(ACTION_UP, x2, y2, client.width, client.height))
-                bus.info(f"[{serial}] 注入[scrcpy] swipe ({x1},{y1})->({x2},{y2}) {dur}ms")
-            else:
-                await _input_action(serial, "swipe", {
-                    "x_pct": nx1, "y_pct": ny1, "x2_pct": nx2, "y2_pct": ny2,
-                    "duration_ms": dur})
-                bus.info(f"[{serial}] 注入[adb] swipe ({nx1:.3f},{ny1:.3f})->({nx2:.3f},{ny2:.3f}) {dur}ms")
-        await _ack(ws, "swipe", targets)
-        return
-
-    if action == "scroll":
-        nx = float(data.get("nx", 0.5))
-        ny = float(data.get("ny", 0.5))
-        delta = float(data.get("delta", -1.0))  # 正值向上滚动
-        if client.control_enabled and client.running:
-            x, y = int(nx * client.width), int(ny * client.height)
-            await client.send_control(encode_inject_scroll(x, y, client.width, client.height, 0.0, delta))
-            bus.info(f"[{client.serial}] 注入[scrcpy] scroll ({x},{y}) delta={delta}")
-        else:
-            size = await _screen_size(client.serial)
-            w, h = size or (0, 0)
-            if w and h:
-                cy = int(ny * h)
-                dy = int(h * 0.15) * (1 if delta < 0 else -1)
-                await adb.input_swipe(client.serial, int(w / 2), cy, int(w / 2), cy + dy, 120)
-                bus.info(f"[{client.serial}] 注入[adb] scroll swipe delta={delta}")
-        await _ack(ws, "scroll", [client.serial])
-        return
-
-    if action == "key":
-        targets = data.get("targets") or [client.serial]
-        for serial in targets:
-            await _input_action(serial, "key", {"keycode": str(data.get("keycode", ""))})
-            bus.info(f"[{serial}] 注入[adb] key {data.get('keycode')}")
-        await _ack(ws, "key", targets)
-        return
-
-    if action == "text":
-        targets = data.get("targets") or [client.serial]
-        for serial in targets:
-            await _input_action(serial, "text", {"text": str(data.get("text", ""))})
-            bus.info(f"[{serial}] 注入[adb] text {str(data.get('text', ''))[:40]!r}")
-        await _ack(ws, "text", targets)
-        return
-
-    if action == "set_clipboard":
-        if client.control_enabled and client.running:
-            await client.send_control(encode_set_clipboard(str(data.get("text", "")), paste=bool(data.get("paste"))))
-            bus.info(f"[{client.serial}] 注入[scrcpy] set_clipboard {str(data.get('text', ''))[:40]!r}")
-        await _ack(ws, "set_clipboard", [client.serial])
-        return
 
     if action == "stats":
         await ws.send_json({"type": "stats", "fps": round(client.fps(), 1),
                             "frames": client.frames, "width": client.width, "height": client.height})
         return
 
+    if action == "set_clipboard":
+        if client.control_enabled and client.running:
+            await client.send_control(encode_set_clipboard(str(data.get("text", "")), paste=bool(data.get("paste"))))
+            bus.info(f"[{client.serial}] 注入[scrcpy] set_clipboard {str(data.get('text', ''))[:40]!r}")
+        return
 
-async def _ack(ws: WebSocket, action: str, targets: list) -> None:
-    """指令处理完成回执：前端可据此确认链路通到后端。"""
+    # 其余动作一律拒绝, 引导走 HTTP 统一入口
+    bus.warn(f"[{client.serial}] WS 收到不支持的操作 {action}（请走 /api/input）")
     with suppress(Exception):
-        await ws.send_json({"type": "injected", "action": action, "targets": targets})
+        await ws.send_json({"type": "error", "msg": f"操作 {action} 应走 HTTP /api/input（前端版本过旧请刷新页面）"})
 
 
 _shutdown_watchdog_started = False
