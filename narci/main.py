@@ -1,6 +1,8 @@
 """narciFarm 主应用：REST API + WebSocket（投屏桥接 / 事件流）+ 后台循环。"""
 import asyncio
 import json
+import os
+import threading
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -112,9 +114,11 @@ async def lifespan(app: FastAPI):
     _background.append(asyncio.create_task(scheduler.scheduler_loop()))
     bus.info(f"narciFarm 已启动: http://{HOST}:{PORT}")
     yield
+    bus.info("lifespan 关闭: 停止后台任务与投屏会话")
     for t in _background:
         t.cancel()
     await hub.stop_all()
+    bus.info("lifespan 关闭完成")
 
 
 app = FastAPI(title="narciFarm", version="0.1.0", lifespan=lifespan)
@@ -207,7 +211,11 @@ async def api_shell(serial: str, body: dict):
 
 @app.post("/api/devices/{serial}/input")
 async def api_input(serial: str, body: dict):
-    await _input_action(serial, body["action"], body.get("params", {}))
+    try:
+        await _input_action(serial, body["action"], body.get("params", {}))
+    except adb.AdbError as e:
+        bus.error(f"[{serial}] 注入失败: {e}")
+        return {"ok": False, "error": str(e)}
     return {"ok": True}
 
 
@@ -606,6 +614,25 @@ async def _ack(ws: WebSocket, action: str, targets: list) -> None:
         await ws.send_json({"type": "injected", "action": action, "targets": targets})
 
 
+_shutdown_watchdog_started = False
+
+
+def start_shutdown_watchdog(grace: float = 10.0) -> None:
+    """优雅停机的兜底：超时未退出则强制结束进程，保证关闭请求必然生效。"""
+    global _shutdown_watchdog_started
+    if _shutdown_watchdog_started:
+        return
+    _shutdown_watchdog_started = True
+
+    def _kill() -> None:
+        bus.error(f"优雅停机超过 {grace:.0f}s 未完成，强制退出进程")
+        os._exit(0)
+
+    t = threading.Timer(grace, _kill)
+    t.daemon = True
+    t.start()
+
+
 @app.post("/api/shutdown")
 async def api_shutdown():
     """优雅停机（先经 lifespan 停掉投屏会话与后台任务）。
@@ -617,6 +644,7 @@ async def api_shutdown():
     if server is None:
         raise HTTPException(400, "当前启动方式不支持远程关闭：请在控制台按 Ctrl+C 或直接关闭窗口")
     server.should_exit = True
+    start_shutdown_watchdog()
     bus.info("收到关闭请求，服务即将退出")
     return {"ok": True}
 

@@ -279,12 +279,14 @@ class SnapshotMirror {
       const dur = Math.max(60, Math.round(performance.now() - g.t0));
       try {
         if (g.moved) {
-          await API.post(`/api/devices/${encodeURIComponent(this.serial)}/input`,
+          const r = await API.post(`/api/devices/${encodeURIComponent(this.serial)}/input`,
             { action: 'swipe', params: { x_pct: g.x0, y_pct: g.y0, x2_pct: nx, y2_pct: ny, duration_ms: dur } });
+          if (r && r.ok === false) { toast(r.error, 'error', 6000); return; }
           this._record({ type: 'swipe', x_pct: +g.x0.toFixed(4), y_pct: +g.y0.toFixed(4), x2_pct: +nx.toFixed(4), y2_pct: +ny.toFixed(4), duration_ms: dur });
         } else {
-          await API.post(`/api/devices/${encodeURIComponent(this.serial)}/input`,
+          const r = await API.post(`/api/devices/${encodeURIComponent(this.serial)}/input`,
             { action: 'tap', params: { x_pct: nx, y_pct: ny } });
+          if (r && r.ok === false) { toast(r.error, 'error', 6000); return; }
           this._record({ type: 'tap', x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) });
         }
       } catch (err) { toast(err.message, 'error'); }

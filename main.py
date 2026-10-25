@@ -8,6 +8,7 @@
 """
 import argparse
 import logging
+import os
 import socket
 import sys
 import threading
@@ -15,6 +16,8 @@ import webbrowser
 
 import narci.config as cfg
 from narci.events import bus
+
+_shutdown_watchdog_started = False
 
 
 def display_url(host: str, port: int) -> str:
@@ -87,9 +90,11 @@ def _make_tray(url: str, server_holder: dict):
 
     def quit_app(icon=None, item=None):
         server = server_holder.get("server")
+        bus.info(f"托盘请求退出 (server={'已挂接' if server is not None else '缺失!'})")
         if server is not None:
             server.should_exit = True
-        bus.info("托盘请求退出")
+        from narci.main import start_shutdown_watchdog
+        start_shutdown_watchdog()
 
     menu = pystray.Menu(
         pystray.MenuItem("打开管理台", open_ui, default=True),
@@ -143,11 +148,12 @@ def main() -> None:
         _fatal_box(f"服务异常退出: {type(e).__name__}: {e}")
         raise
     finally:
+        bus.info("server.run 已返回，停止托盘图标")
         if tray is not None:
-            try:
-                tray.stop()
-            except Exception:
-                pass
+            ts = threading.Thread(target=tray.stop, daemon=True, name="narci-tray-stop")
+            ts.start()
+            ts.join(timeout=3)
+        bus.info("进程即将退出")
 
 
 if __name__ == "__main__":
