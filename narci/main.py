@@ -12,8 +12,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import adb, db, scenario, scheduler
 from .config import (CAPTURES_DIR, DEVICE_REFRESH_INTERVAL, HOST, MAX_FPS,
-                     MAX_SIZE, PORT, SNAPSHOT_INTERVAL, UPLOADS_DIR,
-                     VIDEO_BITRATE)
+                     MAX_SIZE, PORT, SNAPSHOT_INTERVAL, STATIC_DIR,
+                     UPLOADS_DIR, VIDEO_BITRATE)
 from .events import bus
 from .scrcpy_client import ScrcpyClient, ScrcpyClientError, hub
 from .scrcpy_protocol import (ACTION_DOWN, ACTION_MOVE, ACTION_UP,
@@ -590,7 +590,6 @@ async def _handle_ws_command(ws: WebSocket, client: ScrcpyClient, data: dict) ->
 
 # ---------- 静态资源 ----------
 
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
 

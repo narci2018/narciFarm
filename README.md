@@ -52,6 +52,35 @@ py -3 -m uvicorn narci.main:app --host 127.0.0.1 --port 8555
 
 手机开启 USB 调试插入即可出现在列表；WiFi 设备可 `adb connect ip:5555` 或用「扫描局域网」。
 
+## 构建与发布（打 tag 自动云端编译）
+
+推送到 GitHub 后，打 tag 即触发 [.github/workflows/release.yml](.github/workflows/release.yml)：
+
+```bash
+git tag v0.1.0
+git push origin main v0.1.0
+```
+
+两个并行 Job：
+
+| Job | Runner | 产物 | 说明 |
+|---|---|---|---|
+| `build-pc-exe` | windows-latest | `narciFarm-windows-x64.exe` | PyInstaller 单文件，内置 adb + scrcpy-server + 前端；打包后自动冒烟测试（启动 exe、探测 `/api/settings`） |
+| `build-android-server` | ubuntu-latest | `scrcpy-server-5.0.1` | 从 [scrcpy v5.0.1](https://github.com/Genymobile/scrcpy) 源码无 Gradle 构建（JDK17 + android-36 + build-tools 36.0.0），与官方预编译 jar 同版本可互换 |
+
+两个产物自动挂载到该 tag 的 GitHub Release；手动触发（workflow_dispatch）只产出 Actions Artifact 不发 Release。
+
+**本机打包**：
+
+```bash
+:: 可选：把 adb 三件套放进 build_stage/adb/ 一起打包（否则运行时用系统 PATH 的 adb）
+py -3 -m PyInstaller narciFarm.spec --noconfirm   # 产物 dist/narciFarm.exe
+dist\narciFarm.exe [--port 8555] [--no-browser]
+```
+
+exe 的可写数据（数据库/截图/上传缓存）在 exe 同级目录的 `data/`、`captures/`。
+
+
 ## 使用要点
 
 - **选中目标**：左侧勾选设备；分组可批量管理勾选集合。

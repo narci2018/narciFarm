@@ -1,25 +1,58 @@
-"""narciFarm 全局配置。所有路径/端口/码率均可通过环境变量覆盖。"""
+"""narciFarm 全局配置。所有路径/端口/码率均可通过环境变量覆盖。
+
+支持 PyInstaller 冻结运行：
+- 只读资源（static/assets）在 _MEIPASS 解包目录；
+- 可写数据（data/captures）放在 exe 同级目录，避免写进临时解包目录。
+"""
 import os
 import shutil
+import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 
-DATA_DIR = Path(os.environ.get("NARCI_DATA_DIR", BASE_DIR / "data"))
-CAPTURES_DIR = Path(os.environ.get("NARCI_CAPTURES_DIR", BASE_DIR / "captures"))
+def _resource_base() -> Path:
+    """只读资源根：开发时 = 项目根；冻结后 = 解包目录(_MEIPASS)。"""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return Path(__file__).resolve().parent.parent
+
+
+def _writable_base() -> Path:
+    """可写数据根：冻结后 = exe 所在目录；开发时 = 项目根。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+BASE_DIR = _resource_base()
+WRITABLE_DIR = _writable_base()
+
+DATA_DIR = Path(os.environ.get("NARCI_DATA_DIR", WRITABLE_DIR / "data"))
+CAPTURES_DIR = Path(os.environ.get("NARCI_CAPTURES_DIR", WRITABLE_DIR / "captures"))
 UPLOADS_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "narci.db"
 
+STATIC_DIR = BASE_DIR / "static"
 ASSETS_DIR = BASE_DIR / "assets"
 SERVER_JAR = Path(os.environ.get("NARCI_SERVER_JAR", ASSETS_DIR / "scrcpy-server.jar"))
 SERVER_VERSION = os.environ.get("NARCI_SERVER_VERSION", "5.0.1")
 REMOTE_JAR_PATH = os.environ.get("NARCI_REMOTE_JAR", "/data/local/tmp/narci_scrcpy_server.jar")
 
-ADB_PATH = (
-    os.environ.get("NARCI_ADB")
-    or shutil.which("adb")
-    or r"C:\tools\platform-tools\adb.exe"
-)
+
+def _find_adb() -> str:
+    env = os.environ.get("NARCI_ADB")
+    if env:
+        return env
+    bundled = BASE_DIR / "tools" / "adb" / ("adb.exe" if os.name == "nt" else "adb")
+    if bundled.exists():
+        return str(bundled)
+    found = shutil.which("adb")
+    if found:
+        return found
+    return r"C:\tools\platform-tools\adb.exe"
+
+
+ADB_PATH = _find_adb()
 
 HOST = os.environ.get("NARCI_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NARCI_PORT", "8555"))
