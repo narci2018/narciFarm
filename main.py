@@ -33,7 +33,10 @@ def main() -> None:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
     from narci.main import app
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+    server = uvicorn.Server(config)
+    app.state.server = server  # 供 /api/shutdown 优雅停机
+    server.run()
 
 
 if __name__ == "__main__":

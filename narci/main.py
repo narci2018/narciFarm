@@ -588,6 +588,21 @@ async def _handle_ws_command(ws: WebSocket, client: ScrcpyClient, data: dict) ->
         return
 
 
+@app.post("/api/shutdown")
+async def api_shutdown():
+    """优雅停机（先经 lifespan 停掉投屏会话与后台任务）。
+
+    仅在通过 main.py 入口（exe / python main.py）启动时可用；
+    `python -m uvicorn` 模块方式启动时拿不到 Server 对象，提示用户用 Ctrl+C。
+    """
+    server = getattr(app.state, "server", None)
+    if server is None:
+        raise HTTPException(400, "当前启动方式不支持远程关闭：请在控制台按 Ctrl+C 或直接关闭窗口")
+    server.should_exit = True
+    bus.info("收到关闭请求，服务即将退出")
+    return {"ok": True}
+
+
 # ---------- 静态资源 ----------
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

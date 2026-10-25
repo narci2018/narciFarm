@@ -142,6 +142,17 @@ function bindOverview() {
       refreshDevices(true);
     } catch (e) { toast(e.message, 'error'); }
   };
+  $('btn-shutdown').onclick = async () => {
+    if (!confirm('确定关闭 narciFarm 服务？投屏会话与后台任务将一并停止。')) return;
+    try {
+      await API.post('/api/shutdown');
+      document.body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;justify-content:center;' +
+        'color:#7d8b9d;font-size:16px;flex-direction:column;gap:10px">' +
+        '<div>服务已关闭，此页面不再可用。</div><div style="font-size:13px">如需再次使用，请重新运行 narciFarm.exe。</div></div>';
+    } catch (e) {
+      toast(e.message.replace(/^\d+ /, ''), 'error', 6000);
+    }
+  };
 }
 
 function fillDeviceSelects() {
