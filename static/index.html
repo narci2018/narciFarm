@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>narciFarm - 设备农场管理</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">🐾 narciFarm</div>
+  <div class="topstats">
+    <span id="st-adb" class="stat-dot"></span><span class="stat-label">adb</span>
+    <span id="st-jar" class="stat-dot"></span><span class="stat-label">server</span>
+    <span id="st-online" class="stat-num">0</span><span class="stat-label">在线设备</span>
+  </div>
+  <div class="topactions">
+    <button id="btn-refresh" class="btn">刷新设备</button>
+    <button id="btn-scan" class="btn">扫描局域网</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="side-title">设备（勾选 = 选中目标）</div>
+    <ul id="device-list" class="device-list"></ul>
+    <div class="side-title">分组</div>
+    <div class="group-add">
+      <input id="group-name" placeholder="新分组名">
+      <button id="btn-add-group" class="btn small">添加</button>
+    </div>
+    <ul id="group-list" class="group-list"></ul>
+    <div class="group-ops">
+      <select id="assign-group"></select>
+      <button id="btn-assign" class="btn small">选中设备加入分组</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <nav class="tabs">
+      <button class="tab active" data-tab="overview">设备总览</button>
+      <button class="tab" data-tab="broadcast">群控广播</button>
+      <button class="tab" data-tab="batch">批量操作</button>
+      <button class="tab" data-tab="scenario">场景编排</button>
+      <button class="tab" data-tab="schedule">定时调度</button>
+      <button class="tab" data-tab="console">ADB 控制台</button>
+      <button class="tab" data-tab="captures">截图库</button>
+      <button class="tab" data-tab="logs">日志</button>
+    </nav>
+
+    <section id="tab-overview" class="tabpane active">
+      <div class="toolbar">
+        <label><input type="checkbox" id="ov-autorefresh" checked> 快照自动刷新</label>
+        <span class="hint">点击快照打开投屏窗口；投屏内可将操作广播到左侧勾选设备</span>
+      </div>
+      <div id="device-grid" class="device-grid"></div>
+    </section>
+
+    <section id="tab-broadcast" class="tabpane">
+      <div class="pane-card">
+        <h3>群控广播（QtScrcpy MASTER 模式）</h3>
+        <p class="hint">选择主控设备打开投屏，投屏窗口内勾选「广播到选中设备」，
+          你的点击 / 滑动 / 按键 / 文本将同步执行到左侧勾选的所有设备。坐标按各设备分辨率自动换算。</p>
+        <div class="form-row">
+          <label>主控设备</label>
+          <select id="bc-master"></select>
+          <button id="bc-open" class="btn primary">打开投屏窗口</button>
+        </div>
+        <h4>快捷群发</h4>
+        <div class="form-row">
+          <label>文本</label>
+          <input id="bc-text" placeholder="输入要群发的文本">
+          <button id="bc-send-text" class="btn">群发文本</button>
+        </div>
+        <div class="form-row">
+          <label>按键</label>
+          <select id="bc-key">
+            <option value="home">HOME</option><option value="back">返回</option>
+            <option value="menu">菜单</option><option value="power">电源</option>
+            <option value="volume_up">音量+</option><option value="volume_down">音量-</option>
+            <option value="recents">最近任务</option><option value="enter">回车</option>
+          </select>
+          <button id="bc-send-key" class="btn">群发按键</button>
+        </div>
+        <div class="form-row">
+          <label>停留唤醒</label>
+          <button id="bc-stayon" class="btn">对选中设备开启 stay awake</button>
+        </div>
+        <div id="bc-result" class="result-box"></div>
+      </div>
+    </section>
+
+    <section id="tab-batch" class="tabpane">
+      <div class="pane-card">
+        <h3>批量安装 APK</h3>
+        <div class="form-row">
+          <input type="file" id="batch-apk" accept=".apk">
+          <button id="batch-install" class="btn primary">安装到选中设备</button>
+        </div>
+        <div id="batch-install-result" class="result-box"></div>
+      </div>
+      <div class="pane-card">
+        <h3>批量推送文件</h3>
+        <div class="form-row">
+          <input type="file" id="batch-file">
+          <input id="batch-remote" placeholder="远端路径，如 /sdcard/Download/">
+          <button id="batch-push" class="btn primary">推送到选中设备</button>
+        </div>
+        <div id="batch-push-result" class="result-box"></div>
+      </div>
+      <div class="pane-card">
+        <h3>Shell 群发</h3>
+        <div class="form-row">
+          <input id="batch-shell-cmd" placeholder="shell 命令，如 getprop ro.product.model">
+          <button id="batch-shell" class="btn primary">在选中设备执行</button>
+        </div>
+        <div id="batch-shell-result" class="result-box"></div>
+      </div>
+      <div class="pane-card">
+        <h3>批量截图</h3>
+        <div class="form-row">
+          <button id="batch-shot" class="btn primary">选中设备全部截图</button>
+          <span class="hint">保存到服务端 captures 目录，可在「截图库」查看</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-scenario" class="tabpane">
+      <div class="split">
+        <div class="pane-card narrow">
+          <h3>场景列表</h3>
+          <ul id="sc-list" class="plain-list"></ul>
+          <div class="form-row">
+            <input id="sc-new-name" placeholder="新场景名">
+            <button id="sc-new" class="btn small">新建</button>
+          </div>
+        </div>
+        <div class="pane-card grow">
+          <h3 id="sc-editor-title">编辑场景</h3>
+          <div class="form-row">
+            <label>名称</label><input id="sc-name">
+            <label>整场景重复</label><input id="sc-repeat" type="number" min="1" value="1" class="num">
+          </div>
+          <table class="steps-table"><tbody id="sc-steps"></tbody></table>
+          <div class="form-row">
+            <select id="sc-add-type">
+              <option value="tap">tap 点击</option><option value="swipe">swipe 滑动</option>
+              <option value="text">text 输入文本</option><option value="key">key 按键</option>
+              <option value="back">back 返回</option><option value="home">home 主屏</option>
+              <option value="launch">launch 启动应用</option><option value="stop_app">stop_app 停止应用</option>
+              <option value="wait">wait 等待</option><option value="shell">shell 命令</option>
+              <option value="screenshot">screenshot 截图</option><option value="tap_text">tap_text 按文本点击</option>
+              <option value="loop">loop 循环</option>
+            </select>
+            <button id="sc-add" class="btn small">添加步骤</button>
+            <span class="spacer"></span>
+            <button id="sc-export" class="btn small">导出 JSON</button>
+            <label class="btn small filelabel">导入 JSON<input type="file" id="sc-import" accept=".json" hidden></label>
+          </div>
+          <div class="form-row">
+            <button id="sc-save" class="btn primary">保存场景</button>
+            <button id="sc-run" class="btn primary">在选中设备运行</button>
+            <span class="spacer"></span>
+            <button id="sc-abort" class="btn danger">中止选中运行</button>
+          </div>
+          <div class="form-row"><textarea id="sc-editor-raw" rows="6" placeholder="步骤 JSON（高级直接编辑）"></textarea></div>
+          <div class="form-row"><button id="sc-apply-raw" class="btn small">应用 JSON → 步骤表</button></div>
+          <h4>运行状态</h4>
+          <div id="sc-runs" class="result-box">暂无运行</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-schedule" class="tabpane">
+      <div class="pane-card">
+        <h3>新建调度</h3>
+        <div class="form-row">
+          <label>名称</label><input id="sd-name" placeholder="调度名">
+          <label>场景</label><select id="sd-scenario"></select>
+          <label>目标分组</label><select id="sd-group"></select>
+        </div>
+        <div class="form-row">
+          <label>类型</label>
+          <select id="sd-kind"><option value="interval">间隔（秒，跑完再等 N 秒）</option><option value="daily">每天 HH:MM</option></select>
+          <label>值</label><input id="sd-value" placeholder="3600 或 09:30">
+          <label class="chk"><input type="checkbox" id="sd-enabled" checked> 启用</label>
+          <button id="sd-add" class="btn primary">添加调度</button>
+        </div>
+      </div>
+      <div class="pane-card">
+        <h3>调度列表</h3>
+        <table class="data-table" id="sd-table">
+          <thead><tr><th>ID</th><th>名称</th><th>场景</th><th>目标</th><th>类型</th><th>值</th><th>上次运行</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-console" class="tabpane">
+      <div class="pane-card">
+        <div class="form-row">
+          <label>设备</label><select id="cs-device"></select>
+          <input id="cs-cmd" placeholder="shell 命令，回车执行" style="flex:1">
+          <button id="cs-run" class="btn primary">执行</button>
+        </div>
+        <pre id="cs-out" class="console-out"></pre>
+      </div>
+    </section>
+
+    <section id="tab-captures" class="tabpane">
+      <div class="toolbar"><button id="cp-reload" class="btn">刷新</button></div>
+      <div id="capture-grid" class="capture-grid"></div>
+    </section>
+
+    <section id="tab-logs" class="tabpane">
+      <div class="toolbar"><label><input type="checkbox" id="log-autoscroll" checked> 自动滚动</label></div>
+      <pre id="log-view" class="console-out"></pre>
+    </section>
+  </main>
+</div>
+
+<!-- 投屏模态窗口 -->
+<div id="mirror-modal" class="modal hidden">
+  <div class="mirror-wrap">
+    <div class="mirror-bar">
+      <span id="mm-title">投屏</span>
+      <span id="mm-fps" class="hint"></span>
+      <label class="chk"><input type="checkbox" id="mm-broadcast"> 广播到选中设备</label>
+      <label class="chk"><input type="checkbox" id="mm-record"> 录制动作</label>
+      <span class="spacer"></span>
+      <input id="mm-text" placeholder="输入文本→发送 / 剪贴板">
+      <button id="mm-send-text" class="btn small">输入</button>
+      <button id="mm-clipboard" class="btn small">存剪贴板</button>
+      <button id="mm-shot" class="btn small">截图</button>
+      <button id="mm-close" class="btn small danger">关闭</button>
+    </div>
+    <div class="mirror-subbar">
+      <button class="btn small" data-key="back">返回</button>
+      <button class="btn small" data-key="home">HOME</button>
+      <button class="btn small" data-key="menu">菜单</button>
+      <button class="btn small" data-key="recents">最近</button>
+      <button class="btn small" data-key="power">电源</button>
+      <button class="btn small" data-key="volume_up">音量+</button>
+      <button class="btn small" data-key="volume_down">音量-</button>
+      <span id="mm-record-ind" class="hint"></span>
+    </div>
+    <div class="mirror-stage"><canvas id="mm-canvas" width="360" height="800"></canvas></div>
+  </div>
+</div>
+
+<div id="toasts" class="toasts"></div>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/mirror.js"></script>
+<script src="/static/js/scenario.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

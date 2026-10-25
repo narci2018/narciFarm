@@ -1,0 +1,13 @@
+# 运行时数据
+data/
+captures/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# 参考源码克隆（体积大，重新获取: git clone --depth 1 --branch v5.0.1 https://github.com/Genymobile/scrcpy refs/scrcpy）
+refs/
+
+# 上传缓存
+data/uploads/
