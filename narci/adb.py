@@ -47,10 +47,25 @@ async def _run(args: list[str], timeout: float = 20, device: Optional[str] = Non
     return proc.returncode or 0, out, err
 
 
+_INJECT_DENIED_MARKS = ("INJECT_EVENTS", "SecurityException")
+
+
+def _friendly_adb_error(args: list[str], err_text: str) -> str:
+    if any(m in err_text for m in _INJECT_DENIED_MARKS) and any(
+            a in " ".join(args) for a in ("input", "keyevent")):
+        return ("设备拒绝了输入注入（厂商安全限制）。"
+                "小米/红米: 开发者选项 → 开启「USB 调试（安全设置）」后重插 USB；"
+                "vivo: 「USB 模拟点击」；OPPO 类似。开启后 narciFarm 两条注入路径均会生效。")
+    return err_text
+
+
 async def _run_ok(args: list[str], timeout: float = 20, device: Optional[str] = None) -> bytes:
     rc, out, err = await _run(args, timeout, device)
     if rc != 0:
-        raise AdbError(f"adb {' '.join(args[:3])} 失败(rc={rc}): {err.decode('utf-8', 'replace').strip()[:300]}")
+        err_text = err.decode("utf-8", "replace").strip()[:300]
+        if rc != 0 and not err_text:
+            raise AdbError(f"adb {' '.join(args[:3])} 失败(rc={rc})（无错误输出）")
+        raise AdbError(f"adb {' '.join(args[:3])} 失败(rc={rc}): {_friendly_adb_error(args, err_text)}")
     return out
 
 
