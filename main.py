@@ -88,13 +88,16 @@ def _make_tray(url: str, server_holder: dict):
     def open_ui(icon=None, item=None):
         webbrowser.open(url)
 
-    def quit_app(icon=None, item=None):
-        server = server_holder.get("server")
-        bus.info(f"托盘请求退出 (server={'已挂接' if server is not None else '缺失!'})")
-        if server is not None:
-            server.should_exit = True
-        from narci.main import start_shutdown_watchdog
-        start_shutdown_watchdog()
+def quit_app(icon=None, item=None):
+    server = server_holder.get("server")
+    bus.info(f"托盘请求退出 (server={'已挂接' if server is not None else '缺失!'})")
+    if server is not None:
+        server.should_exit = True
+    # 【关键新增】立即停止托盘图标，防止“服务停了图标还在”
+    if icon is not None:
+        icon.stop()
+    from narci.main import start_shutdown_watchdog
+    start_shutdown_watchdog()
 
     menu = pystray.Menu(
         pystray.MenuItem("打开管理台", open_ui, default=True),
