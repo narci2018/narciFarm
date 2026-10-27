@@ -94,8 +94,13 @@ def quit_app(icon=None, item=None):
     if server is not None:
         server.should_exit = True
     # 【关键新增】立即停止托盘图标，防止“服务停了图标还在”
-    if icon is not None:
-        icon.stop()
+    icon_to_stop = icon
+    server = server_holder.get("server")
+    bus.info(f"托盘请求退出 (server={'已挂接' if server is not None else '缺失!'}, icon={'有' if icon_to_stop else '没有'})")
+    if server is not None:
+        server.should_exit = True
+    if icon_to_stop is not None:
+        icon_to_stop.stop()
     from narci.main import start_shutdown_watchdog
     start_shutdown_watchdog()
 

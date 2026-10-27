@@ -15,7 +15,7 @@
  * 文本 JSON: {type:"session"|"device"|"error"|"stats", ...}
  */
 
-const ELAPSED_LOG = (elapsed_ms) => {
+function ELAPSED_LOG(elapsed_ms) {
   const s = `${(elapsed_ms/1000).toFixed(2)}s`;
   const txt = document.getElementById('mm-inject-status');
   if (txt) {
@@ -24,7 +24,7 @@ const ELAPSED_LOG = (elapsed_ms) => {
     txt.textContent += `（加载耗时 ${s}）`;
   }
   console.log('[镜像加载耗时] ' + s);
-};
+}
 
 function splitAvcc(payload) {
   const nals = [];
@@ -131,8 +131,8 @@ class Mirror {
             const elapsed_ms = this._readyAt - (this._connectAt || 0);
             const elapsed_s = (elapsed_ms / 1000);
             Diag.send('sessionready', { width: d.width, height: d.height, elapsed: elapsed_s.toFixed(1), at: this._readyAt });
-            if (typeof Analytics !== 'undefined') {
-              Analytics.capture('mirror_ready', {
+            if (window.Analytics) {
+              window.Analytics.capture('mirror_ready', {
                 elapsed_ms: Math.round(elapsed_ms),
                 width: d.width, height: d.height,
               });
@@ -341,8 +341,8 @@ class Mirror {
 
   _startFallback(reason) {
     if (this.fallback || this.closed) return;
-    Diag.send('fallback', { reason: String(reason || '').slice(0, 80) });            if (typeof Analytics !== 'undefined') {
-              Analytics.capture('mirror_fallback', {
+    Diag.send('fallback', { reason: String(reason || '').slice(0, 80) });    if (window.Analytics) {
+      window.Analytics.capture('mirror_fallback', {
                 reason: String(reason || '').slice(0, 80),
                 elapsed_ms: Math.round(performance.now() - (this._connectAt || performance.now())),
               });

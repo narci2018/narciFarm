@@ -163,14 +163,17 @@ def _targets_body(body: dict) -> list[str]:
 
 @app.get("/api/settings")
 async def api_settings():
-    from .config import ADB_PATH, POSTHOG_HOST, POSTHOG_KEY, SERVER_JAR, SERVER_VERSION
+    # getattr 防御: 防止 config 常量缺失/半接线提交导致 500（CI 冒烟测试曾因此失败）
+    from . import config as _cfg
+    from .config import ADB_PATH, SERVER_JAR, SERVER_VERSION
     return {
         "adb": ADB_PATH, "adb_ok": adb.server_available(),
         "server_jar": str(SERVER_JAR), "server_jar_ok": SERVER_JAR.exists(),
         "scrcpy_version": SERVER_VERSION,
         "max_size": MAX_SIZE, "bitrate": VIDEO_BITRATE, "fps": MAX_FPS,
         "snapshot_interval": SNAPSHOT_INTERVAL,
-        "posthog_key": POSTHOG_KEY, "posthog_host": POSTHOG_HOST,
+        "posthog_key": getattr(_cfg, "POSTHOG_KEY", ""),
+        "posthog_host": getattr(_cfg, "POSTHOG_HOST", ""),
     }
 
 

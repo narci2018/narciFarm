@@ -103,6 +103,8 @@ exe 的可写数据（数据库/截图/上传缓存）在 exe 同级目录的 `d
 | `NARCI_MAX_SIZE` | 1280 | 投屏长边上限（带宽权衡） |
 | `NARCI_BITRATE` / `NARCI_FPS` | 8Mbps / 30 | 投屏码率/帧率 |
 | `NARCI_SERVER_VERSION` | 5.0.1 | scrcpy-server 版本（协议严格匹配） |
+| `NARCI_POSTHOG_KEY` | 空（不启用） | PostHog 项目 key；配置后顶栏出现「使用分析」勾选框，**用户勾选后才**录制会话回放 |
+| `NARCI_POSTHOG_HOST` | `https://us.i.posthog.com` | PostHog 上报域名（EU Cloud 填 `https://eu.i.posthog.com`） |
 
 ## 测试与已知边界
 
@@ -119,6 +121,8 @@ exe 的可写数据（数据库/截图/上传缓存）在 exe 同级目录的 `d
 |---|---|---|
 | [scrcpy-server v5.0.1](https://github.com/Genymobile/scrcpy) (assets/) | Apache-2.0 | 设备端投屏服务（Genymobile ©） |
 | [FastAPI](https://github.com/fastapi/fastapi) / uvicorn | MIT / BSD-3 | Web 框架 |
+| [posthog-js](https://github.com/PostHog/posthog-js) 1.438.24（`static/vendor/posthog-js/`） | Apache-2.0 AND MIT | 会话回放 / 使用分析（默认关闭，需用户同意；输入框与日志文本遮罩，投屏画面不录制）
+  更新：`npm install posthog-js@<版本> && npm run vendor:posthog` |
 | 协议实现参考 | — | `refs/scrcpy/` 为参考用浅克隆（已 gitignore，勿随项目分发） |
 
 narciFarm 自身代码采用 Apache-2.0。

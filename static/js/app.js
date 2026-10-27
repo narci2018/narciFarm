@@ -8,6 +8,7 @@ const State = {
   apps: [],
   selected: new Set(),
   settings: {},
+  settingsLoaded: false,
   currentScenario: null,
   mirror: null,
   lastShotAt: {},
@@ -17,12 +18,22 @@ const $ = (id) => document.getElementById(id);
 
 window.appSelectedDevices = () => State.devices.filter(d => State.selected.has(d.serial)).map(d => d.serial);
 
+// 使用分析是 ES module（defer 执行）：等它就绪且设置已加载后再初始化
+let analyticsBooted = false;
+function bootAnalytics() {
+  if (analyticsBooted || !window.Analytics || !State.settingsLoaded) return;
+  analyticsBooted = true;
+  window.Analytics.init(State.settings);
+}
+document.addEventListener('narci:analytics-ready', bootAnalytics);
+
 // ---------- 初始化 ----------
 
 async function init() {
   try { State.settings = await API.get('/api/settings'); } catch (e) {}
   // 使用分析：默认关闭，用户勾选「使用分析」后才初始化（见 analytics.js）
-  if (typeof Analytics !== 'undefined') Analytics.init(State.settings);
+  State.settingsLoaded = true;
+  bootAnalytics();
   $('st-adb').classList.toggle('on', !!State.settings.adb_ok);
   $('st-jar').classList.toggle('on', !!State.settings.server_jar_ok);
   if (!State.settings.adb_ok) toast('未找到 adb，请设置 NARCI_ADB 环境变量', 'error');
@@ -45,8 +56,8 @@ async function init() {
   connectEventStream();
 
   await Promise.all([refreshDevices(), refreshGroups(), refreshScenarios(), refreshSchedules()]);
-  if (typeof Analytics !== 'undefined') {
-    Analytics.capture('app_loaded', {
+  if (window.Analytics) {
+    window.Analytics.capture('app_loaded', {
       devices: State.devices.length,
       online: State.devices.filter(d => d.state === 'device').length,
     });
@@ -264,8 +275,8 @@ async function runBroadcast(url, body) {
   if (!serials.length) return toast('请先勾选设备', 'error');
   try {
     const r = await API.post(url, { ...body, targets: serials });
-    if (typeof Analytics !== 'undefined') {
-      Analytics.capture('broadcast_sent', { action: body.action, targets: serials.length, ok: r.ok !== false });
+    if (window.Analytics) {
+      window.Analytics.capture('broadcast_sent', { action: body.action, targets: serials.length, ok: r.ok !== false });
     }
     let text = `发送 ${r.sent}/${serials.length}` + (Object.keys(r.failed).length ? `，失败: ${JSON.stringify(r.failed)}` : '');
     const notes = [...new Set(Object.values(r.notes || {}))];
@@ -558,9 +569,9 @@ function bindCaptures() {
 // ---------- 投屏模态窗口 ----------
 
 function openMirror(serial, opts = {}) {
-  if (typeof Analytics !== 'undefined') {
+  if (window.Analytics) {
     // 关键旅程起点：回放里可直接定位“打开投屏 → 出画面”这段耗时
-    Analytics.capture('mirror_opened', {
+    window.Analytics.capture('mirror_opened', {
       broadcast: !!opts.defaultBroadcast,
       selected: window.appSelectedDevices().length,
     });
@@ -616,22 +627,22 @@ function openMirror(serial, opts = {}) {
     const bar = document.getElementById('mirror-bar');
     if (bar) {
       let startX = 0, startY = 0, movedTo = { left: null, top: null };
-      bar.addEventListener('mousedown', (e) => {
+      bar.addEventListener('mousedown', function (e) {
         if (e.button !== 0) return;
-        const rect = wrap.getBoundingClientRect();
+        var rect = wrap.getBoundingClientRect();
         movedTo = { left: rect.left, top: rect.top };
         startX = e.clientX; startY = e.clientY;
         bar.style.cursor = 'grabbing';
         document.body.style.userSelect = 'none';
-        const onMove = (ev) => {
+        var onMove = function (ev) {
           if (movedTo.left == null) return;
-          const dx = ev.clientX - startX;
-          const dy = ev.clientY - startY;
+          var dx = ev.clientX - startX;
+          var dy = ev.clientY - startY;
           wrap.style.left = (movedTo.left + dx) + 'px';
           wrap.style.top = (movedTo.top + dy) + 'px';
           wrap.style.transform = 'none';
         };
-        const onUp = () => {
+        var onUp = function () {
           bar.style.cursor = '';
           document.body.style.userSelect = '';
           document.removeEventListener('mousemove', onMove);
@@ -643,21 +654,21 @@ function openMirror(serial, opts = {}) {
       });
     }
     // 右下角resize handeler拖拽还原窗口大小（min宽高以CSS约束为准）
-    const rh = document.getElementById('mirror-resize-handler');
+    var rh = document.getElementById('mirror-resize-handler');
     if (rh) {
-      rh.addEventListener('mousedown', (e) => {
+      rh.addEventListener('mousedown', function (e) {
         if (e.button !== 0) return;
         e.preventDefault();
-        const startX = e.clientX, startY = e.clientY;
-        const rect = wrap.getBoundingClientRect();
-        const startW = rect.width, startH = rect.height;
-        const onMove = (ev) => {
-          const nw = Math.max(360, startW + (ev.clientX - startX));
-          const nh = Math.max(320, startH + (ev.clientY - startY));
+        var startX = e.clientX, startY = e.clientY;
+        var rect = wrap.getBoundingClientRect();
+        var startW = rect.width, startH = rect.height;
+        var onMove = function (ev) {
+          var nw = Math.max(360, startW + (ev.clientX - startX));
+          var nh = Math.max(320, startH + (ev.clientY - startY));
           wrap.style.width = nw + 'px';
           wrap.style.height = nh + 'px';
         };
-        const onUp = () => {
+        var onUp = function () {
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
         };
@@ -667,7 +678,7 @@ function openMirror(serial, opts = {}) {
     }
   }
 
-  const statsTimer = setInterval(() => {
+  var statsTimer = window.setInterval(function () {
     if (State.mirror && !State.mirror.fallback) {
       State.mirror.requestStats();
       $('mm-fps').textContent = `${State.mirror.fps} fps · ${State.mirror.width}x${State.mirror.height}`;

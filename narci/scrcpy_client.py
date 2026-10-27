@@ -147,9 +147,15 @@ class ScrcpyClient:
         if self._control:
             self._tasks.append(asyncio.create_task(self._read_control_loop()))
 
-        # 提示服务端已开始推流（第一帧/配置到达时 _ready.set()）；
-        # 不在此阻塞等待——若服务端慢则前端 WebSocket 一连上就会收数据，
-        # 否则快速报错并降级，避免 Event.wait(timeout=...) 这类不兼容调用
+        # 等待 scrcpy server 完全就绪：视频配置/首帧到达即继续（消除前端空等）
+        # asyncio.Event.wait() 是协程，直接用 asyncio.wait_for 限时，无需线程池
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=15)
+        except Exception:
+            pass
+        if not self._ready.is_set():
+            bus.warn(f"[{self.serial}] scrcpy server 就绪超时（15 秒），但继续提供服务")
+
         bus.info(f"[{self.serial}] 投屏会话已建立 (scid={self._scid:08x}, name={self.device_name!r})")
 
     async def stop(self, reason: str = "手动停止") -> None:
@@ -230,6 +236,11 @@ class ScrcpyClient:
                     # 第一帧到达也表示服务器已完全就绪
                     if self.frames == 1:
                         self._ready.set()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not self._closing:
+                await self.stop(f"视频流异常: {e}")
         except asyncio.IncompleteReadError:
             if not self._closing:
                 await self.stop("视频流中断")

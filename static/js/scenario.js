@@ -145,6 +145,9 @@ const ScenarioEditor = {
     if (!this.scenarioId) { toast('请先保存场景', 'error'); return; }
     try {
       const r = await API.post(`/api/scenarios/${this.scenarioId}/run`, { targets: window.appSelectedDevices() });
+      if (window.Analytics) {
+        window.Analytics.capture('scenario_run_started', { targets: r.targets.length });
+      }
       toast(`场景已启动 run=${r.run_id.slice(0, 8)} 设备=${r.targets.length}`, 'ok');
     } catch (e) { toast(e.message, 'error'); }
   },

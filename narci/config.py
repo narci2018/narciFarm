@@ -70,5 +70,10 @@ SNAPSHOT_INTERVAL = float(os.environ.get("NARCI_SNAPSHOT_INTERVAL", "4"))
 DEVICE_POLL_CONCURRENCY = int(os.environ.get("NARCI_POLL_CONCURRENCY", "8"))
 LAN_SCAN_CONCURRENCY = int(os.environ.get("NARCI_LAN_SCAN_CONCURRENCY", "64"))
 
+# 使用分析 / 会话回放（PostHog，可选）：项目 key 由前端 /api/settings 取用。
+# 留空 = 不启用（前端不加载 SDK、不发任何请求）；key 是公开的写入令牌，不是机密。
+POSTHOG_KEY = os.environ.get("NARCI_POSTHOG_KEY", "").strip()
+POSTHOG_HOST = os.environ.get("NARCI_POSTHOG_HOST", "https://us.i.posthog.com").strip()
+
 for _d in (DATA_DIR, CAPTURES_DIR, UPLOADS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
