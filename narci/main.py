@@ -17,7 +17,7 @@ from .config import (CAPTURES_DIR, DEVICE_REFRESH_INTERVAL, HOST, MAX_FPS,
                      MAX_SIZE, PORT, SNAPSHOT_INTERVAL, STATIC_DIR,
                      UPLOADS_DIR, VIDEO_BITRATE)
 from .events import bus
-from .scrcpy_client import ScrcpyClient, hub
+from .scrcpy_client import ScrcpyClient, ScrcpyClientError, ensure_jar_pushed, hub
 from .scrcpy_protocol import encode_set_clipboard
 
 _wm_size_cache: dict[str, tuple[float, tuple[int, int]]] = {}
@@ -98,18 +98,21 @@ async def refresh_devices() -> int:
             bus.info(f"发现新设备: {serial} ({d['model']})")
         else:
             db.touch_device(serial)
-        if d["state"] == "device" and (time.time() - _info_fetch_at.get(serial, 0) > 300):
-            try:
-                info = await adb.get_build_info(serial)
-                w, h = await adb.get_screen_size(serial)
-                db.update_device(serial, model=info["model"] or d["model"],
-                                 android_version=info["android_version"],
-                                 sdk=info["sdk"], width=w, height=h)
-                _wm_size_cache[serial] = (time.time(), (w, h))
-                _info_fetch_at[serial] = time.time()
-            except Exception as e:
-                bus.warn(f"读取设备信息失败 {serial}: {e}")
-                _info_fetch_at[serial] = time.time() - 240
+        if d["state"] == "device":
+            if serial not in _open_server_jars:
+                asyncio.create_task(ensure_jar_pushed(serial))  # 预推送，打开投屏即免 push
+            if time.time() - _info_fetch_at.get(serial, 0) > 300:
+                try:
+                    info = await adb.get_build_info(serial)
+                    w, h = await adb.get_screen_size(serial)
+                    db.update_device(serial, model=info["model"] or d["model"],
+                                     android_version=info["android_version"],
+                                     sdk=info["sdk"], width=w, height=h)
+                    _wm_size_cache[serial] = (time.time(), (w, h))
+                    _info_fetch_at[serial] = time.time()
+                except Exception as e:
+                    bus.warn(f"读取设备信息失败 {serial}: {e}")
+                    _info_fetch_at[serial] = time.time() - 240
     # WiFi 设备自动重连: 注册表里的无线设备(序列号含 ":")掉线时每 60s 尝试一次
     now = time.time()
     for row in db.list_devices(include_disabled=False):
@@ -143,7 +146,7 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-__version__ = "0.4.9"
+__version__ = "0.5.0"
 app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 

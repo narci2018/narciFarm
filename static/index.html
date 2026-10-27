@@ -244,37 +244,41 @@
   </main>
 </div>
 
-<!-- 投屏模态窗口 -->
-<div id="mirror-modal" class="modal hidden">
-  <div class="mirror-wrap">
-    <div class="mirror-bar">
-      <span id="mm-title">投屏</span>
-      <span id="mm-fps" class="hint"></span>
-      <label class="chk"><input type="checkbox" id="mm-broadcast"> 广播到选中设备</label>
-      <label class="chk"><input type="checkbox" id="mm-record"> 录制动作</label>
-      <span class="spacer"></span>
-      <input id="mm-text" placeholder="输入文本→发送 / 剪贴板">
-      <button id="mm-send-text" class="btn small">输入</button>
-      <button id="mm-paste" class="btn small" title="文本含中文时自动走剪贴板粘贴路径">粘贴</button>
-      <button id="mm-clipboard" class="btn small">存剪贴板</button>
-      <button id="mm-record-video" class="btn small">⏺ 录像</button>
-      <button id="mm-shot" class="btn small">截图</button>
-      <button id="mm-close" class="btn small danger">关闭</button>
-    </div>
-    <div class="mirror-subbar">
-      <button class="btn small" data-key="wake">唤醒</button>
-      <button class="btn small" data-key="back">返回</button>
-      <button class="btn small" data-key="home">HOME</button>
-      <button class="btn small" data-key="menu">菜单</button>
-      <button class="btn small" data-key="recents">最近</button>
-      <button class="btn small" data-key="power">电源</button>
-      <button class="btn small" data-key="volume_up">音量+</button>
-      <button class="btn small" data-key="volume_down">音量-</button>
-      <span id="mm-inject-status" class="hint">就绪</span>
-      <span id="mm-record-ind" class="hint"></span>
-      <span class="hint">手机熄屏时首次操作会自动发唤醒键（橙色提示）；锁屏需在手机上手动解锁</span>
-    </div>
-    <div class="mirror-stage"><canvas id="mm-canvas" width="360" height="800"></canvas></div>
+<!-- 投屏窗口（可拖拽/可缩放） -->
+<div id="mirror-modal" class="mirror-move hidden">
+  <div class="mirror-bar">
+    <span id="mm-title">投屏</span>
+    <span id="mm-fps" class="hint"></span>
+    <label class="chk"><input type="checkbox" id="mm-broadcast"> 广播到选中设备</label>
+    <label class="chk"><input type="checkbox" id="mm-record"> 录制动作</label>
+    <span class="spacer"></span>
+    <input id="mm-text" placeholder="输入文本→发送 / 剪贴板">
+    <button id="mm-send-text" class="btn small">输入</button>
+    <button id="mm-paste" class="btn small" title="文本含中文时自动走剪贴板粘贴路径">粘贴</button>
+    <button id="mm-clipboard" class="btn small">存剪贴板</button>
+    <button id="mm-record-video" class="btn small">⏺ 录像</button>
+    <button id="mm-shot" class="btn small">截图</button>
+    <button id="mm-close" class="btn small danger">关闭</button>
+  </div>
+  <div class="mirror-subbar">
+    <button class="btn small" data-key="wake">唤醒</button>
+    <button class="btn small" data-key="back">返回</button>
+    <button class="btn small" data-key="home">HOME</button>
+    <button class="btn small" data-key="menu">菜单</button>
+    <button class="btn small" data-key="recents">最近</button>
+    <button class="btn small" data-key="power">电源</button>
+    <button class="btn small" data-key="volume_up">音量+</button>
+    <button class="btn small" data-key="volume_down">音量-</button>
+    <span id="mm-inject-status" class="hint">就绪</span>
+    <span id="mm-record-ind" class="hint"></span>
+    <span class="hint">手机熄屏时首次操作会自动发唤醒键（橙色提示）；锁屏需在手机上手动解锁</span>
+  </div>
+  <div class="mirror-stage"><canvas id="mm-canvas" width="360" height="800"></canvas></div>
+  <div id="mm-loading" class="mm-loading">
+    <div class="spinner"></div>
+    <div id="mm-loading-text">正在连接投屏…</div>
+    <div class="hint">首次连接需向设备推送服务，约数秒；若异常慢请查「日志」页的"投屏启动耗时"分解</div>
+    <button id="mm-loading-cancel" class="btn small danger">取消</button>
   </div>
 </div>
 

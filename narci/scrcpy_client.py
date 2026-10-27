@@ -19,6 +19,17 @@ from .scrcpy_protocol import (DEVICE_META_LEN, PacketHeader,
 _open_server_jars: set[str] = set()  # 已推送过 jar 的设备 serial
 
 
+async def ensure_jar_pushed(serial: str) -> None:
+    """预推送 scrcpy-server（发现设备时后台调用），打开投屏即省去一次 push。"""
+    if serial in _open_server_jars:
+        return
+    try:
+        await adb.push(serial, str(SERVER_JAR), REMOTE_JAR_PATH, timeout=60)
+        _open_server_jars.add(serial)
+    except Exception as e:
+        bus.warn(f"[{serial}] 预推送 scrcpy-server 失败: {e}")
+
+
 class ScrcpyClientError(Exception):
     pass
 
@@ -103,6 +114,13 @@ class ScrcpyClient:
         if not SERVER_JAR.exists():
             raise ScrcpyClientError(f"缺少 scrcpy-server: {SERVER_JAR}，请先运行 scripts/fetch_scrcpy_server.py")
 
+        # 分阶段计时（定位"投屏加载慢"瓶颈；日志与网页日志页同步输出）
+        t0 = time.monotonic()
+        marks: dict[str, float] = {}
+
+        async def _mark(name: str) -> None:
+            marks[name] = time.monotonic() - t0
+
         self._scid = random.getrandbits(31)
         self._port = await _free_port()
         socket_name = f"scrcpy_{self._scid:08x}"
@@ -110,8 +128,12 @@ class ScrcpyClient:
         if self.serial not in _open_server_jars:
             await adb.push(self.serial, str(SERVER_JAR), REMOTE_JAR_PATH, timeout=60)
             _open_server_jars.add(self.serial)
+            await _mark("jar推送")
+        else:
+            await _mark("jar已缓存")
 
         await adb.add_forward(self.serial, self._port, socket_name)
+        await _mark("端口转发")
 
         server_args = (
             f"CLASSPATH={REMOTE_JAR_PATH} app_process / com.genymobile.scrcpy.Server {SERVER_VERSION} "
@@ -127,12 +149,14 @@ class ScrcpyClient:
             creationflags=adb.CREATE_NO_WINDOW,
         )
         self._tasks.append(asyncio.create_task(self._pump_server_logs()))
+        await _mark("server进程启动")
 
         try:
-            self._video = await _connect_with_retry(self._port, expect_dummy=True)
+            self._video = await _connect_with_retry(self._port, expect_dummy=True, attempts=12)
             if self.control_enabled:
                 # server 在 accept 视频 socket 后才 accept 控制 socket，紧随其后连接即可
-                self._control = await _connect_with_retry(self._port, expect_dummy=False, attempts=15)
+                self._control = await _connect_with_retry(self._port, expect_dummy=False, attempts=8)
+            await _mark("隧道连接")
             meta = await asyncio.wait_for(self._video[0].readexactly(DEVICE_META_LEN), timeout=5)
             self.device_name = meta.rstrip(b"\x00").decode("utf-8", "replace")
             codec = await asyncio.wait_for(self._video[0].readexactly(4), timeout=5)
@@ -146,17 +170,22 @@ class ScrcpyClient:
         self._tasks.append(asyncio.create_task(self._read_video_loop()))
         if self._control:
             self._tasks.append(asyncio.create_task(self._read_control_loop()))
+        await _mark("读流就绪")
 
         # 等待 scrcpy server 完全就绪：视频配置/首帧到达即继续（消除前端空等）
         # asyncio.Event.wait() 是协程，直接用 asyncio.wait_for 限时，无需线程池
         try:
-            await asyncio.wait_for(self._ready.wait(), timeout=15)
+            await asyncio.wait_for(self._ready.wait(), timeout=8)
         except Exception:
             pass
+        await _mark("首帧/配置到达")
         if not self._ready.is_set():
-            bus.warn(f"[{self.serial}] scrcpy server 就绪超时（15 秒），但继续提供服务")
+            bus.warn(f"[{self.serial}] scrcpy server 就绪超时（8 秒），但继续提供服务")
 
-        bus.info(f"[{self.serial}] 投屏会话已建立 (scid={self._scid:08x}, name={self.device_name!r})")
+        total = time.monotonic() - t0
+        breakdown = " ".join(f"{k}={v * 1000:.0f}ms" for k, v in marks.items())
+        bus.info(f"[{self.serial}] 投屏启动耗时: {breakdown} | 总计={total * 1000:.0f}ms "
+                  f"(scid={self._scid:08x}, name={self.device_name!r})")
 
     async def stop(self, reason: str = "手动停止") -> None:
         if self._closing:

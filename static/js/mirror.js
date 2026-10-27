@@ -163,6 +163,7 @@ class Mirror {
       this.width = w; this.height = h;
       this.canvas.width = w; this.canvas.height = h;
     }
+    if (this.opts.onReady) this.opts.onReady();
   }
 
   _onBinary(buf) {
