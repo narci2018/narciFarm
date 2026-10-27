@@ -143,7 +143,8 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-app = FastAPI(title="narciFarm", version="0.1.0", lifespan=lifespan)
+__version__ = "0.4.2"
+app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 
 def _targets_body(body: dict) -> list[str]:
@@ -170,6 +171,11 @@ async def api_settings():
         "max_size": MAX_SIZE, "bitrate": VIDEO_BITRATE, "fps": MAX_FPS,
         "snapshot_interval": SNAPSHOT_INTERVAL,
     }
+
+
+@app.get("/api/version")
+async def api_version():
+    return {"version": __version__ or "0.1.0"}
 
 
 @app.post("/api/diag")

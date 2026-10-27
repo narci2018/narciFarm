@@ -26,6 +26,9 @@ async function init() {
   if (!State.settings.adb_ok) toast('未找到 adb，请设置 NARCI_ADB 环境变量', 'error');
   if (!State.settings.server_jar_ok) toast('缺少 scrcpy-server.jar，运行 scripts/fetch_scrcpy_server.py', 'error', 8000);
 
+  // 同步版本号（若服务端 __version__ 已更新则会自动生效）
+  try { const v = await API.get('/api/version'); State.version = String(v.version || '?'); $('st-version').textContent = State.version; } catch (e) { $('st-version').textContent = '?'; }
+
   bindTabs();
   bindSidebar();
   bindOverview();
