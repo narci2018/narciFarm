@@ -92,6 +92,85 @@ def test_execute_rand_wait(monkeypatch):
     assert 100 <= r["ms"] <= 200
 
 
+def test_screen_awake_parses(monkeypatch):
+    import asyncio
+
+    async def fake_run_ok(args, timeout=20, device=None):
+        return b"  mWakefulness=Asleep\r\n"
+
+    monkeypatch.setattr(adb, "_run_ok", fake_run_ok)
+    assert asyncio.run(adb.screen_awake("S")) is False
+
+    async def fake_run_ok_awake(args, timeout=20, device=None):
+        return b"  mWakefulness=Awake\r\n"
+
+    monkeypatch.setattr(adb, "_run_ok", fake_run_ok_awake)
+    assert asyncio.run(adb.screen_awake("S")) is True
+
+
+def test_screen_awake_falls_back_without_grep(monkeypatch):
+    """设备 shell 没有 grep / 无匹配时，退化为拉全量 dumpsys 本地解析。"""
+    import asyncio
+
+    seen = []
+
+    async def fake_run_ok(args, timeout=20, device=None):
+        seen.append(args[1])
+        if "grep" in args[1]:
+            raise adb.AdbError("grep: not found")
+        return b"mWakefulness=Asleep"
+
+    monkeypatch.setattr(adb, "_run_ok", fake_run_ok)
+    assert asyncio.run(adb.screen_awake("S")) is False
+    assert len(seen) == 2
+
+
+def test_ensure_awake_wakes_when_asleep(monkeypatch):
+    import asyncio
+
+    adb._awake_cache.clear()
+    woke = []
+
+    async def fake_asleep(serial):
+        return False
+
+    async def fake_wake(serial):
+        woke.append(serial)
+
+    monkeypatch.setattr(adb, "screen_awake", fake_asleep)
+    monkeypatch.setattr(adb, "wake_up", fake_wake)
+
+    note = asyncio.run(adb.ensure_awake("S1"))
+    assert note and "熄屏" in note
+    assert woke == ["S1"]
+    # TTL 内再次注入：不重复探测、不重复唤醒、不重复返回 note
+    assert asyncio.run(adb.ensure_awake("S1")) is None
+    assert woke == ["S1"]
+    adb._awake_cache.clear()
+
+
+def test_ensure_awake_passthrough_and_probe_failure(monkeypatch):
+    import asyncio
+
+    adb._awake_cache.clear()
+
+    async def fake_awake(serial):
+        return True
+
+    monkeypatch.setattr(adb, "screen_awake", fake_awake)
+    assert asyncio.run(adb.ensure_awake("S2")) is None  # 亮屏：直接放行
+
+    adb._awake_cache.clear()
+
+    async def fake_unknown(serial):
+        return None  # 探测失败
+
+    monkeypatch.setattr(adb, "screen_awake", fake_unknown)
+    assert asyncio.run(adb.ensure_awake("S3")) is None  # 探测失败不阻塞、不报错
+    assert not adb._awake_cache  # 且不留下误导性缓存
+    adb._awake_cache.clear()
+
+
 def test_coords_pct_vs_px():
     step = {"x_pct": 0.5, "y_pct": 0.25}
     assert sc._coords(step, (1080, 2400)) == (540, 600)

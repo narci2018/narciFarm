@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from typing import Optional
 
@@ -245,6 +246,63 @@ async def stop_app(serial: str, package: str) -> None:
 
 async def stay_awake(serial: str, on: bool) -> None:
     await _run_ok(["shell", f"svc power stayon {'true' if on else 'false'}"], device=serial, timeout=10)
+
+
+# ---------- 屏幕唤醒（真机复现：熄屏时 input 注入 rc=0 但完全不生效） ----------
+
+_wakefulness_re = re.compile(r"mWakefulness=(\w+)")
+_awake_cache: dict[str, tuple[float, bool]] = {}
+AWAKE_CHECK_TTL = 3.0  # 交互延迟权衡：3 秒内不重复探测
+
+
+async def screen_awake(serial: str) -> Optional[bool]:
+    """屏幕是否可交互（mWakefulness=Awake）。检测失败返回 None，由调用方放行。"""
+    async def probe(args: list[str]) -> Optional[bool]:
+        out = await _run_ok(args, device=serial, timeout=8)
+        m = _wakefulness_re.search(out.decode("utf-8", "replace"))
+        return (m.group(1) == "Awake") if m else None
+
+    try:
+        got = await probe(["shell", "dumpsys power | grep -m1 mWakefulness="])
+        if got is not None:
+            return got
+    except AdbError:
+        pass
+    # 部分设备 shell 里没有 grep 或无该字段：退化为拉全量 dumpsys 本地解析
+    try:
+        return await probe(["shell", "dumpsys power"])
+    except AdbError:
+        return None
+
+
+async def wake_up(serial: str) -> None:
+    """KEYCODE_WAKEUP(224)：只唤醒，不会像 POWER(26) 那样有把屏幕按灭的风险。"""
+    await input_keyevent(serial, 224)
+
+
+async def ensure_awake(serial: str) -> Optional[str]:
+    """注入前置守卫：熄屏时 input tap/keyevent 会“成功”但设备毫无反应。
+
+    检测到熄屏先发唤醒键，并返回给界面展示的说明；探测/唤醒的任何异常都
+    吞掉——检测本身绝不能拦下用户本来要执行的注入。
+    """
+    now = time.time()
+    hit = _awake_cache.get(serial)
+    awake = hit[1] if (hit and now - hit[0] < AWAKE_CHECK_TTL) else None
+    if awake is None:
+        awake = await screen_awake(serial)
+        if awake is None:  # 探测不到（设备忙/不支持）：按原样放行
+            return None
+        _awake_cache[serial] = (now, awake)
+    if awake:
+        return None
+    try:
+        await wake_up(serial)
+    except AdbError:
+        return None
+    _awake_cache[serial] = (time.time(), True)
+    bus.warn(f"[{serial}] 设备熄屏，注入不会生效 → 已自动发送唤醒键（锁屏需手动解锁）")
+    return "设备熄屏已自动唤醒；若停在锁屏请手动解锁后重新操作"
 
 
 # ---------- 文件 ----------

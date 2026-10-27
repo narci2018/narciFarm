@@ -119,6 +119,7 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
 @keyframes rip { from { transform: scale(.4); opacity: .95; } to { transform: scale(5); opacity: 0; } }
 #mm-inject-status.ok { color: var(--ok); }
 #mm-inject-status.bad { color: var(--bad); }
+#mm-inject-status.warn { color: var(--warn); }
 #mm-canvas { max-height: 74vh; max-width: 92vw; background: #000; cursor: crosshair; }
 
 .toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column;
@@ -128,3 +129,4 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
   box-shadow: 0 4px 16px rgba(0,0,0,.5); }
 .toast.error { border-left-color: var(--bad); }
 .toast.ok { border-left-color: var(--ok); }
+.toast.warn { border-left-color: var(--warn); }

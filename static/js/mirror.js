@@ -47,6 +47,10 @@ async function sendInput(targets, action, params, onFeedback) {
     if (r && r.ok === false) {
       const failed = Object.entries(r.results || {}).filter(([, v]) => !v.ok);
       toast(`注入失败: ${failed.map(([s, v]) => `${s}: ${v.error}`).join('；').slice(0, 160)}`, 'error', 6000);
+    } else if (r && r.results) {
+      // 服务端附带的提醒（如“设备熄屏已自动唤醒”）必须透出，否则用户以为点了没反应
+      const notes = [...new Set(Object.values(r.results).map(v => v && v.note).filter(Boolean))];
+      notes.forEach(n => toast(n, 'warn', 7000));
     }
     return r;
   } catch (e) {

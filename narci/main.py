@@ -17,7 +17,7 @@ from .config import (CAPTURES_DIR, DEVICE_REFRESH_INTERVAL, HOST, MAX_FPS,
                      MAX_SIZE, PORT, SNAPSHOT_INTERVAL, STATIC_DIR,
                      UPLOADS_DIR, VIDEO_BITRATE)
 from .events import bus
-from .scrcpy_client import ScrcpyClient, ScrcpyClientError, hub
+from .scrcpy_client import ScrcpyClient, hub
 from .scrcpy_protocol import encode_set_clipboard
 
 _wm_size_cache: dict[str, tuple[float, tuple[int, int]]] = {}
@@ -43,7 +43,13 @@ async def _scale_xy(serial: str, step: dict) -> tuple[int, int]:
     return x, y
 
 
-async def _input_action(serial: str, action: str, params: dict) -> None:
+async def _input_action(serial: str, action: str, params: dict) -> Optional[str]:
+    """执行单台设备的输入动作。
+
+    先经 ensure_awake 守卫（熄屏时注入会 rc=0 但无效，需先唤醒）。
+    返回附加说明（如“设备熄屏已自动唤醒”），正常情况下为 None。
+    """
+    note = await adb.ensure_awake(serial)
     if action == "tap":
         x, y = await _scale_xy(serial, params)
         await adb.input_tap(serial, x, y)
@@ -62,6 +68,7 @@ async def _input_action(serial: str, action: str, params: dict) -> None:
         await adb.input_keyevent(serial, code)
     else:
         raise ValueError(f"未知输入动作: {action}")
+    return note
 
 
 # ---------- 后台：设备发现循环 ----------
@@ -265,9 +272,9 @@ async def api_input_multi(body: dict):
 
     async def one(serial: str) -> dict:
         try:
-            await _input_action(serial, action, params)
+            note = await _input_action(serial, action, params)
             bus.info(f"[{serial}] 注入[adb] {action} {json.dumps(params, ensure_ascii=False)[:100]}")
-            return {"ok": True}
+            return {"ok": True, **({"note": note} if note else {})}
         except adb.AdbError as e:
             bus.error(f"[{serial}] 注入失败: {e}")
             return {"ok": False, "error": str(e)}
@@ -283,12 +290,12 @@ async def api_input_multi(body: dict):
 @app.post("/api/devices/{serial}/input")
 async def api_input(serial: str, body: dict):
     try:
-        await _input_action(serial, body["action"], body.get("params", {}))
+        note = await _input_action(serial, body["action"], body.get("params", {}))
     except adb.AdbError as e:
         bus.error(f"[{serial}] 注入失败: {e}")
         return {"ok": False, "error": str(e)}
     bus.info(f"[{serial}] 注入[adb] {body['action']} {json.dumps(body.get('params', {}), ensure_ascii=False)[:100]}")
-    return {"ok": True}
+    return {"ok": True, **({"note": note} if note else {})}
 
 
 @app.post("/api/broadcast")
@@ -299,14 +306,15 @@ async def api_broadcast(body: dict):
 
     async def one(serial: str):
         try:
-            await _input_action(serial, action, params)
-            return serial, None
+            note = await _input_action(serial, action, params)
+            return serial, None, note
         except Exception as e:
-            return serial, str(e)
+            return serial, str(e), None
 
     results = await asyncio.gather(*(one(s) for s in targets))
-    failed = {s: err for s, err in results if err}
-    return {"ok": not failed, "sent": len(targets) - len(failed), "failed": failed}
+    failed = {s: err for s, err, _ in results if err}
+    notes = {s: n for s, _, n in results if n}
+    return {"ok": not failed, "sent": len(targets) - len(failed), "failed": failed, "notes": notes}
 
 
 @app.post("/api/devices/{serial}/screenshot")
@@ -530,9 +538,10 @@ async def ws_mirror(ws: WebSocket, serial: str):
     control = ws.query_params.get("control", "1") != "0"
     try:
         client = await hub.acquire(serial, control=control)
-    except (ScrcpyClientError, adb.AdbError) as e:
-        bus.error(f"[{serial}] 投屏连接失败: {e}")
-        await ws.send_json({"type": "error", "msg": str(e)})
+    except Exception as e:  # noqa: BLE001 - 任何连接失败都必须可见：写日志 + 回前端错误帧
+        bus.error(f"[{serial}] 投屏连接失败: {type(e).__name__}: {e}")
+        with suppress(Exception):
+            await ws.send_json({"type": "error", "msg": str(e)})
         await ws.close()
         return
 
@@ -566,6 +575,10 @@ async def ws_mirror(ws: WebSocket, serial: str):
                     await ws.send_json({"type": "error", "msg": f"注入失败: {e}"})
     except WebSocketDisconnect:
         pass
+    except Exception as e:  # noqa: BLE001 - 接收循环异常也不能无声吞掉
+        bus.error(f"[{serial}] 投屏 WS 异常: {type(e).__name__}: {e}")
+        with suppress(Exception):
+            await ws.send_json({"type": "error", "msg": f"投屏通道异常: {e}"})
     finally:
         hub.unsubscribe(serial, queue)
         writer_task.cancel()
@@ -574,12 +587,20 @@ async def ws_mirror(ws: WebSocket, serial: str):
 
 
 async def _mirror_writer(ws: WebSocket, queue: asyncio.Queue) -> None:
-    while True:
-        kind, data = await queue.get()
-        if kind == "json":
-            await ws.send_json(data)
-        else:
-            await ws.send_bytes(data)
+    """向单个观看者推帧；推送失败必须收尾关连接（否则画面静默冻结）。"""
+    try:
+        while True:
+            kind, data = await queue.get()
+            if kind == "json":
+                await ws.send_json(data)
+            else:
+                await ws.send_bytes(data)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        bus.error(f"投屏推送中断: {type(e).__name__}: {e}（关闭连接以触发前端重连/降级）")
+        with suppress(Exception):
+            await ws.close()
 
 
 async def _handle_ws_command(ws: WebSocket, client: ScrcpyClient, data: dict) -> None:

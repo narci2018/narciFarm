@@ -48,11 +48,63 @@ def test_input_multi_rejects_unknown_action(api):
     assert r.status_code == 400
 
 
+def test_input_multi_surfaces_wake_note(api, monkeypatch):
+    """设备熄屏被自动唤醒时，说明必须回给前端（否则用户以为点击没反应）。"""
+    tc, _ = api
+
+    async def fake_note(serial, action, params):
+        return "设备熄屏已自动唤醒；若停在锁屏请手动解锁后重新操作"
+
+    monkeypatch.setattr(nm, "_input_action", fake_note)
+    r = tc.post("/api/input", json={"serials": ["DEV01"],
+                                    "action": "tap", "params": {"x_pct": 0.5, "y_pct": 0.5}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "熄屏" in body["results"]["DEV01"]["note"]
+
+
 def test_input_multi_requires_targets(api):
     tc, called = api
     r = tc.post("/api/input", json={"serials": [], "action": "tap", "params": {}})
     assert r.status_code == 400
     assert called == []
+
+
+def test_ws_reports_unexpected_acquire_error():
+    """投屏连接的任何异常都必须回错误帧+日志，不能静默断开（旧版零日志无法排障）。"""
+    class BoomHub:
+        serial = "FAKE001"
+
+        async def acquire(self, serial, **kwargs):
+            raise RuntimeError("boom-acquire")
+
+        def subscribe(self, serial):
+            import asyncio
+            return asyncio.Queue()
+
+        def unsubscribe(self, serial, q):
+            pass
+
+        def refs(self, serial):
+            return 1
+
+        async def release(self, serial):
+            pass
+
+        async def stop_all(self):
+            pass
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(nm, "hub", BoomHub())
+    try:
+        with TestClient(nm.app) as tc:
+            with tc.websocket_connect("/ws/mirror/FAKE001?control=1") as ws:
+                msg = ws.receive_json()
+                assert msg["type"] == "error"
+                assert "boom-acquire" in msg["msg"]
+    finally:
+        monkeypatch.undo()
 
 
 def test_ws_rejects_injection_actions(api):

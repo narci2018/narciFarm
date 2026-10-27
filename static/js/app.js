@@ -253,7 +253,11 @@ async function runBroadcast(url, body) {
   if (!serials.length) return toast('请先勾选设备', 'error');
   try {
     const r = await API.post(url, { ...body, targets: serials });
-    $('bc-result').textContent = `发送 ${r.sent}/${serials.length}` + (Object.keys(r.failed).length ? `，失败: ${JSON.stringify(r.failed)}` : '');
+    let text = `发送 ${r.sent}/${serials.length}` + (Object.keys(r.failed).length ? `，失败: ${JSON.stringify(r.failed)}` : '');
+    const notes = [...new Set(Object.values(r.notes || {}))];
+    if (notes.length) text += `\n${notes.join('\n')}`;
+    $('bc-result').textContent = text;
+    notes.forEach(n => toast(n, 'warn', 7000));
   } catch (e) { toast(e.message, 'error'); }
 }
 
@@ -572,9 +576,10 @@ function openMirror(serial, opts = {}) {
     onInjectFeedback: (action, targets, results) => {
       const st = $('mm-inject-status');
       if (!st) return;
+      const notes = Object.values((results && results.results) || {}).map(v => v && v.note).filter(Boolean);
       if (results && results.ok) {
-        st.textContent = `✓ ${action} → ${targets.length} 台`;
-        st.className = 'hint ok';
+        st.textContent = `✓ ${action} → ${targets.length} 台` + (notes.length ? '（已自动唤醒熄屏设备）' : '');
+        st.className = notes.length ? 'hint warn' : 'hint ok';
       } else {
         st.textContent = `✗ ${action} 失败（详见日志页）`;
         st.className = 'hint bad';
