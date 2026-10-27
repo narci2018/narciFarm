@@ -88,6 +88,8 @@ class ScrcpyClient:
         self._tasks: list[asyncio.Task] = []
         self._send_lock = asyncio.Lock()
         self._closing = False
+        # 标记 scrcpy server 是否已完全就绪（视频流开始发送数据）
+        self._ready = asyncio.Event()
 
     @property
     def running(self) -> bool:
@@ -104,6 +106,63 @@ class ScrcpyClient:
         self._scid = random.getrandbits(31)
         self._port = await _free_port()
         socket_name = f"scrcpy_{self._scid:08x}"
+
+        if self.serial not in _open_server_jars:
+            await adb.push(self.serial, str(SERVER_JAR), REMOTE_JAR_PATH, timeout=60)
+            _open_server_jars.add(self.serial)
+
+        await adb.add_forward(self.serial, self._port, socket_name)
+
+        server_args = (
+            f"CLASSPATH={REMOTE_JAR_PATH} app_process / com.genymobile.scrcpy.Server {SERVER_VERSION} "
+            f"tunnel_forward=true audio=false video=true control={'true' if self.control_enabled else 'false'} "
+            f"scid={self._scid:x} log_level=warn "
+            f"max_size={self.max_size} video_bit_rate={self.video_bit_rate} max_fps={self.max_fps} "
+            f"cleanup=false power_on=false clipboard_autosync=false "
+            f"send_dummy_byte=true send_device_meta=true send_stream_meta=true send_frame_meta=true"
+        )
+        self._proc = await asyncio.create_subprocess_exec(
+            adb.ADB_PATH, "-s", self.serial, "shell", server_args,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            creationflags=adb.CREATE_NO_WINDOW,
+        )
+        self._tasks.append(asyncio.create_task(self._pump_server_logs()))
+
+        try:
+            self._video = await _connect_with_retry(self._port, expect_dummy=True)
+            if self.control_enabled:
+                # server 在 accept 视频 socket 后才 accept 控制 socket，紧随其后连接即可
+                self._control = await _connect_with_retry(self._port, expect_dummy=False, attempts=15)
+            meta = await asyncio.wait_for(self._video[0].readexactly(DEVICE_META_LEN), timeout=5)
+            self.device_name = meta.rstrip(b"\x00").decode("utf-8", "replace")
+            codec = await asyncio.wait_for(self._video[0].readexactly(4), timeout=5)
+            if codec != b"h264" and codec != b"\x68\x32\x36\x34":
+                bus.warn(f"[{self.serial}] 视频编码非 h264: {codec!r}")
+        except Exception:
+            await self.stop("启动失败")
+            raise
+
+        self.started_at = time.time()        self._tasks.append(asyncio.create_task(self._read_video_loop()))
+        if self._control:
+            self._tasks.append(asyncio.create_task(self._read_control_loop()))
+
+        # 等待 scrcpy server 完全就绪：视频流已开始发送帧或配置
+        # （此时服务器端已 accept 视频 socket、发送了 SPS/PPS 配置，
+        #  前端 WebSocket 连接上来后能立即收到视频数据，消除数分钟空等）
+        if not self._ready.wait(timeout=15):
+            bus.warn(f"[{self.serial}] scrcpy server 就绪超时（15 秒），但继续提供服务")
+
+        bus.info(f"[{self.serial}] 投屏会话已建立 (scid={self._scid:08x}, name={self.device_name!r})")
+
+    async def start(self) -> None:
+        if self.running:
+            return
+        if not SERVER_JAR.exists():
+            raise ScrcpyClientError(f"缺少 scrcpy-server: {SERVER_JAR}，请先运行 scripts/fetch_scrcpy_server.py")
+
+        self._scid = random.getrandbits(31)
+        self._port = await _free_port()
+        socket_name = f"scrcpy_{self._scid:08x}
 
         if self.serial not in _open_server_jars:
             await adb.push(self.serial, str(SERVER_JAR), REMOTE_JAR_PATH, timeout=60)
@@ -214,11 +273,16 @@ class ScrcpyClient:
                     payload = await reader.readexactly(pkt.size)
                     if self.on_config:
                         await self.on_config(payload)
+                    # scrcpy server 已发送视频配置（SPS/PPS），表示服务端已完全就绪
+                    self._ready.set()
                 else:
                     payload = await reader.readexactly(pkt.size)
                     self.frames += 1
                     if self.on_frame:
                         await self.on_frame(pkt.pts, pkt.key_frame, payload)
+                    # 第一帧到达也表示服务器已完全就绪
+                    if self.frames == 1:
+                        self._ready.set()
         except asyncio.IncompleteReadError:
             if not self._closing:
                 await self.stop("视频流中断")
@@ -302,9 +366,17 @@ class StreamHub:
     async def acquire(self, serial: str, **kwargs) -> ScrcpyClient:
         async with self._lock(serial):
             client = self._clients.get(serial)
-            if client and client.running:
-                self._refs[serial] += 1
-                return client
+            # 复用已有 client（无论 running 与否，尝试恢复连接）
+            if client:
+                if client.running:
+                    self._refs[serial] += 1
+                    return client
+                # client 存在但未 running（如断线后重连），尝试 restart
+                try:
+                    await client.stop("恢复中")
+                except Exception:
+                    pass
+                client = None
             client = ScrcpyClient(serial, **kwargs)
 
             def _fanout(item: tuple) -> None:

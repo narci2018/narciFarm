@@ -93,6 +93,8 @@ class Mirror {
 
   async connect() {
     Diag.send('open', { mode: 'realtime' });
+    // 立即标记连接开始，供后续的 sessionready 计算耗时用
+    this._connectAt = performance.now();
     if (!('VideoDecoder' in window)) {
       this._startFallback('浏览器不支持 WebCodecs');
       return;
@@ -102,7 +104,15 @@ class Mirror {
     this.ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {
         const d = JSON.parse(ev.data);
-        if (d.type === 'session') this._onSession(d.width, d.height);
+        if (d.type === 'session') {
+          this._onSession(d.width, d.height);
+          // 记录连接开始时间（connect() 已在开头记录 _connectAt）
+          if (d.width > 0 && d.height > 0) {
+            this._readyAt = performance.now();
+            const elapsed = (this._readyAt - (this._connectAt || 0)) / 1000; // 秒
+            Diag.send('sessionready', { width: d.width, height: d.height, elapsed: elapsed.toFixed(1), at: this._readyAt });
+          }
+        }
         else if (d.type === 'device') this.deviceName = d.name;
         else if (d.type === 'error') { toast(`投屏提示: ${d.msg}`, 'error', 6000); this._startFallback(d.msg); }
         else if (d.type === 'stats') this.fps = d.fps;

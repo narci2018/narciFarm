@@ -107,8 +107,35 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
   align-items: center; justify-content: center; z-index: 100; }
 .modal.hidden { display: none; }
 .mirror-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-  padding: 10px; max-width: 94vw; }
+  padding: 10px; max-width: 94vw;
+  /* 支持拖拽移动 + 调整大小 */
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  min-width: 360px; min-height: 320px;
+  resize: both; overflow: auto;
+  cursor: default; user-select: none;
+  box-shadow: 0 8px 40px rgba(0,0,0,.6);
+}
+/* 拖拽移动：仅在标题栏生效 */
+.mirror-bar { cursor: move; padding: 6px 8px; border-radius: 8px 8px 0 0;
+  background: var(--panel2); margin: -10px -10px 8px -10px; }
+.mirror-bar:active { cursor: grabbing; }
+/* 调整大小的视觉提示（四角 + 四边） */
+.mirror-wrap::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  border: 1px solid transparent; border-radius: 12px;
+  transition: border-color .15s;
+}
+.mirror-wrap:hover::after { border-color: var(--line); }
+/* 右下角resize handle可见化 */
+.mirror-wrap > .mirror-stage { position: relative; }
+.mirror-wrap > .mirror-stage::after {
+  content: ''; position: absolute; right: 0; bottom: 0; width: 14px; height: 14px;
+  cursor: se-resize;
+  background: transparent;
+}
+.mirror-wrap > .mirror-stage::after:hover { background: rgba(77,163,255,.15); }
 .mirror-bar, .mirror-subbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.mirror-subbar { margin-bottom: 6px; }
 .mirror-bar .chk, .mirror-subbar .chk { color: var(--dim); }
 #mm-title { font-weight: 600; }
 .mirror-stage { display: flex; justify-content: center; background: #000; border-radius: 8px;
