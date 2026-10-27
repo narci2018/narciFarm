@@ -143,7 +143,7 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-__version__ = "0.4.7"
+__version__ = "0.4.9"
 app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 
@@ -163,13 +163,14 @@ def _targets_body(body: dict) -> list[str]:
 
 @app.get("/api/settings")
 async def api_settings():
-    from .config import ADB_PATH, SERVER_JAR, SERVER_VERSION
+    from .config import ADB_PATH, POSTHOG_HOST, POSTHOG_KEY, SERVER_JAR, SERVER_VERSION
     return {
         "adb": ADB_PATH, "adb_ok": adb.server_available(),
         "server_jar": str(SERVER_JAR), "server_jar_ok": SERVER_JAR.exists(),
         "scrcpy_version": SERVER_VERSION,
         "max_size": MAX_SIZE, "bitrate": VIDEO_BITRATE, "fps": MAX_FPS,
         "snapshot_interval": SNAPSHOT_INTERVAL,
+        "posthog_key": POSTHOG_KEY, "posthog_host": POSTHOG_HOST,
     }
 
 

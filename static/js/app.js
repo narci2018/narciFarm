@@ -21,6 +21,8 @@ window.appSelectedDevices = () => State.devices.filter(d => State.selected.has(d
 
 async function init() {
   try { State.settings = await API.get('/api/settings'); } catch (e) {}
+  // 使用分析：默认关闭，用户勾选「使用分析」后才初始化（见 analytics.js）
+  if (typeof Analytics !== 'undefined') Analytics.init(State.settings);
   $('st-adb').classList.toggle('on', !!State.settings.adb_ok);
   $('st-jar').classList.toggle('on', !!State.settings.server_jar_ok);
   if (!State.settings.adb_ok) toast('未找到 adb，请设置 NARCI_ADB 环境变量', 'error');
@@ -43,6 +45,12 @@ async function init() {
   connectEventStream();
 
   await Promise.all([refreshDevices(), refreshGroups(), refreshScenarios(), refreshSchedules()]);
+  if (typeof Analytics !== 'undefined') {
+    Analytics.capture('app_loaded', {
+      devices: State.devices.length,
+      online: State.devices.filter(d => d.state === 'device').length,
+    });
+  }
   setInterval(() => refreshDevices(true), 3000);
   setInterval(refreshRuns, 5000);
   setInterval(snapshotTicker, 1000);
@@ -256,6 +264,9 @@ async function runBroadcast(url, body) {
   if (!serials.length) return toast('请先勾选设备', 'error');
   try {
     const r = await API.post(url, { ...body, targets: serials });
+    if (typeof Analytics !== 'undefined') {
+      Analytics.capture('broadcast_sent', { action: body.action, targets: serials.length, ok: r.ok !== false });
+    }
     let text = `发送 ${r.sent}/${serials.length}` + (Object.keys(r.failed).length ? `，失败: ${JSON.stringify(r.failed)}` : '');
     const notes = [...new Set(Object.values(r.notes || {}))];
     if (notes.length) text += `\n${notes.join('\n')}`;
@@ -547,6 +558,13 @@ function bindCaptures() {
 // ---------- 投屏模态窗口 ----------
 
 function openMirror(serial, opts = {}) {
+  if (typeof Analytics !== 'undefined') {
+    // 关键旅程起点：回放里可直接定位“打开投屏 → 出画面”这段耗时
+    Analytics.capture('mirror_opened', {
+      broadcast: !!opts.defaultBroadcast,
+      selected: window.appSelectedDevices().length,
+    });
+  }
   $('mirror-modal').classList.remove('hidden');
   $('mm-title').textContent = `投屏 ${serial}`;
   $('mm-broadcast').checked = !!opts.defaultBroadcast;
@@ -590,6 +608,64 @@ function openMirror(serial, opts = {}) {
     },
   });
   State.mirror.connect();
+
+  // 模态框支持可拖拽移动 + 调整大小（标题栏拖拽、右下角resize）
+  const wrap = document.getElementById('mirror-wrap');
+  if (wrap) {
+    wrap.classList.add('mirror-move');
+    const bar = document.getElementById('mirror-bar');
+    if (bar) {
+      let startX = 0, startY = 0, movedTo = { left: null, top: null };
+      bar.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        const rect = wrap.getBoundingClientRect();
+        movedTo = { left: rect.left, top: rect.top };
+        startX = e.clientX; startY = e.clientY;
+        bar.style.cursor = 'grabbing';
+        document.body.style.userSelect = 'none';
+        const onMove = (ev) => {
+          if (movedTo.left == null) return;
+          const dx = ev.clientX - startX;
+          const dy = ev.clientY - startY;
+          wrap.style.left = (movedTo.left + dx) + 'px';
+          wrap.style.top = (movedTo.top + dy) + 'px';
+          wrap.style.transform = 'none';
+        };
+        const onUp = () => {
+          bar.style.cursor = '';
+          document.body.style.userSelect = '';
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          movedTo.left = null;
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    }
+    // 右下角resize handeler拖拽还原窗口大小（min宽高以CSS约束为准）
+    const rh = document.getElementById('mirror-resize-handler');
+    if (rh) {
+      rh.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const startX = e.clientX, startY = e.clientY;
+        const rect = wrap.getBoundingClientRect();
+        const startW = rect.width, startH = rect.height;
+        const onMove = (ev) => {
+          const nw = Math.max(360, startW + (ev.clientX - startX));
+          const nh = Math.max(320, startH + (ev.clientY - startY));
+          wrap.style.width = nw + 'px';
+          wrap.style.height = nh + 'px';
+        };
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    }
+  }
 
   const statsTimer = setInterval(() => {
     if (State.mirror && !State.mirror.fallback) {

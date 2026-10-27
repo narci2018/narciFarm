@@ -6,6 +6,25 @@
  * 服务端二进制消息: [0x01][key u8][pts u64][AVCC payload] 帧 | [0x03][config payload]
  * 文本 JSON: {type:"session"|"device"|"error"|"stats", ...}
  */
+/* 投屏组件（v0.3.0 重构）：
+ * - 视频: WS 单向推流 → WebCodecs 解码（失败自动退化快照轮询）
+ * - 操作: 统一走 HTTP /api/input（与批量/群发同一条可靠路径，逐台留痕）
+ * - 反馈: 点击处涟漪标记 + 状态行 + 控制台，链路任一环断开都可见
+ *
+ * 服务端二进制消息: [0x01][key u8][pts u64][AVCC payload] 帧 | [0x03][config payload]
+ * 文本 JSON: {type:"session"|"device"|"error"|"stats", ...}
+ */
+
+const ELAPSED_LOG = (elapsed_ms) => {
+  const s = `${(elapsed_ms/1000).toFixed(2)}s`;
+  const txt = document.getElementById('mm-inject-status');
+  if (txt) {
+    const hasOld = txt.textContent.includes('加载耗时') || txt.textContent.includes('加载中');
+    txt.textContent = hasOld ? txt.textContent.replace(/加载[中耗时][^)]*\)/, '') : txt.textContent;
+    txt.textContent += `（加载耗时 ${s}）`;
+  }
+  console.log('[镜像加载耗时] ' + s);
+};
 
 function splitAvcc(payload) {
   const nals = [];
@@ -109,8 +128,19 @@ class Mirror {
           // 记录连接开始时间（connect() 已在开头记录 _connectAt）
           if (d.width > 0 && d.height > 0) {
             this._readyAt = performance.now();
-            const elapsed = (this._readyAt - (this._connectAt || 0)) / 1000; // 秒
-            Diag.send('sessionready', { width: d.width, height: d.height, elapsed: elapsed.toFixed(1), at: this._readyAt });
+            const elapsed_ms = this._readyAt - (this._connectAt || 0);
+            const elapsed_s = (elapsed_ms / 1000);
+            Diag.send('sessionready', { width: d.width, height: d.height, elapsed: elapsed_s.toFixed(1), at: this._readyAt });
+            if (typeof Analytics !== 'undefined') {
+              Analytics.capture('mirror_ready', {
+                elapsed_ms: Math.round(elapsed_ms),
+                width: d.width, height: d.height,
+              });
+            }
+            if (typeof ELAPSED_LOG === 'function') {
+              const elapsed_ms = this._readyAt - (this._connectAt || 0);
+              ELAPSED_LOG(elapsed_ms);
+            }
           }
         }
         else if (d.type === 'device') this.deviceName = d.name;
@@ -311,7 +341,16 @@ class Mirror {
 
   _startFallback(reason) {
     if (this.fallback || this.closed) return;
-    Diag.send('fallback', { reason: String(reason || '').slice(0, 80) });
+    Diag.send('fallback', { reason: String(reason || '').slice(0, 80) });            if (typeof Analytics !== 'undefined') {
+              Analytics.capture('mirror_fallback', {
+                reason: String(reason || '').slice(0, 80),
+                elapsed_ms: Math.round(performance.now() - (this._connectAt || performance.now())),
+              });
+            }
+            if (typeof ELAPSED_LOG === 'function') {
+              const elapsed_ms = performance.now() - (this._connectAt || performance.now());
+              ELAPSED_LOG(elapsed_ms);
+            }
     console.warn('mirror fallback:', reason);
     this.fallback = new SnapshotMirror(this.serial, this.canvas, this.opts);
     this.fallback.start();
