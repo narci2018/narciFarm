@@ -604,7 +604,8 @@ function openMirror(serial, opts = {}) {
       ScenarioEditor._syncRaw();
       ScenarioEditor.render();
     },
-    onFallback: (reason) => { recInd.textContent = `快照模式(${reason.slice(0, 20)})`; },
+    onFallback: (reason) => { hideLoading(); recInd.textContent = `快照模式(${reason.slice(0, 20)})`; },
+    onReady: () => hideLoading(),
     onInjectFeedback: (action, targets, results) => {
       const st = $('mm-inject-status');
       if (!st) return;
@@ -620,91 +621,58 @@ function openMirror(serial, opts = {}) {
   });
   State.mirror.connect();
 
-  // 模态框支持可拖拽移动 + 调整大小（标题栏拖拽、右下角resize）
-  const wrap = document.getElementById('mirror-wrap');
-  if (wrap) {
-    wrap.classList.add('mirror-move');
-    const bar = document.getElementById('mirror-bar');
-    if (bar) {
-      let startX = 0, startY = 0, movedTo = { left: null, top: null };
-      bar.addEventListener('mousedown', function (e) {
-        if (e.button !== 0) return;
-        var rect = wrap.getBoundingClientRect();
-        movedTo = { left: rect.left, top: rect.top };
-        startX = e.clientX; startY = e.clientY;
-        bar.style.cursor = 'grabbing';
-        document.body.style.userSelect = 'none';
-        var onMove = function (ev) {
-          if (movedTo.left == null) return;
-          var dx = ev.clientX - startX;
-          var dy = ev.clientY - startY;
-          wrap.style.left = (movedTo.left + dx) + 'px';
-          wrap.style.top = (movedTo.top + dy) + 'px';
-          wrap.style.transform = 'none';
-        };
-        var onUp = function () {
-          bar.style.cursor = '';
-          document.body.style.userSelect = '';
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-          movedTo.left = null;
-        };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
-    }
-    // 右下角resize handeler拖拽还原窗口大小（min宽高以CSS约束为准）
-    var rh = document.getElementById('mirror-resize-handler');
-    if (rh) {
-      rh.addEventListener('mousedown', function (e) {
-        if (e.button !== 0) return;
-        e.preventDefault();
-        var startX = e.clientX, startY = e.clientY;
-        var rect = wrap.getBoundingClientRect();
-        var startW = rect.width, startH = rect.height;
-        var onMove = function (ev) {
-          var nw = Math.max(360, startW + (ev.clientX - startX));
-          var nh = Math.max(320, startH + (ev.clientY - startY));
-          wrap.style.width = nw + 'px';
-          wrap.style.height = nh + 'px';
-        };
-        var onUp = function () {
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-        };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
-    }
-  }
+  // ===== 弹窗加载遮罩（连接中可见：旋转指示 + 秒表 + 取消） =====
+  const loadingEl = $('mm-loading');
+  const loadingText = $('mm-loading-text');
+  const openAt = performance.now();
+  loadingEl.classList.remove('hidden');
+  loadingText.textContent = '正在连接投屏… 0.0s';
+  const elapsedTimer = setInterval(() => {
+    loadingText.textContent = `正在连接投屏… 已等待 ${((performance.now() - openAt) / 1000).toFixed(1)}s`;
+  }, 200);
+  const hideLoading = () => { clearInterval(elapsedTimer); loadingEl.classList.add('hidden'); };
+  $('mm-loading-cancel').onclick = () => {
+    hideLoading();
+    if (State.mirror) { State.mirror.close(); State.mirror = null; }
+    $('mirror-modal').classList.add('hidden');
+  };
 
-  var statsTimer = window.setInterval(function () {
-    if (State.mirror && !State.mirror.fallback) {
-      State.mirror.requestStats();
-      $('mm-fps').textContent = `${State.mirror.fps} fps · ${State.mirror.width}x${State.mirror.height}`;
-    } else if (State.mirror && State.mirror.fallback) {
-      $('mm-fps').textContent = '快照轮询模式';
-    }
-  }, 2000);
+  // ===== 弹窗拖拽移动（标题栏）+ 原生 resize:both 缩放（右下角） =====
+  const mv = $('mirror-modal');
+  const bar = mv.querySelector('.mirror-bar');
+  let dragState = null;
+  bar.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button, input, select, label, a')) return;
+    const r = mv.getBoundingClientRect();
+    dragState = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+    bar.setPointerCapture(e.pointerId);
+    bar.style.cursor = 'grabbing';
+  });
+  bar.addEventListener('pointermove', (e) => {
+    if (!dragState) return;
+    const x = Math.min(Math.max(e.clientX - dragState.dx, 0), window.innerWidth - 60);
+    const y = Math.min(Math.max(e.clientY - dragState.dy, 0), window.innerHeight - 40);
+    mv.style.left = x + 'px';
+    mv.style.top = y + 'px';
+    mv.style.transform = 'none';
+  });
+  bar.addEventListener('pointerup', () => { dragState = null; bar.style.cursor = ''; });
 
-  $('mm-close').onclick = closeMirror;
-  $('mirror-modal').onclick = (e) => { if (e.target === $('mirror-modal')) closeMirror(); };
-  function closeMirror() {
-    clearInterval(statsTimer);
+  // ===== 其余工具条绑定（含关闭/加载遮罩收口） =====
+  const closeMirror = () => {
+    hideLoading();
     if (videoRecorder && videoRecorder.state !== 'inactive') videoRecorder.stop();
     if (State.mirror) { State.mirror.close(); State.mirror = null; }
     $('mirror-modal').classList.add('hidden');
-    recInd.textContent = '';
-  }
-  // 快捷键按钮
+  };
+  $('mm-close').onclick = closeMirror;
   document.querySelectorAll('.mirror-subbar [data-key]').forEach(btn => {
     btn.onclick = () => State.mirror && State.mirror.key(btn.dataset.key);
   });
   $('mm-send-text').onclick = async () => {
     const t = $('mm-text').value;
     if (!t || !State.mirror) return;
-    if (/[^\x00-\x7F]/.test(t)) {
-      // 含非 ASCII（中文等）: input text 不支持, 自动走剪贴板粘贴路径
+    if (/[^ -]/.test(t)) {
       if (!State.mirror.pasteText(t)) return toast('粘贴需要实时投屏模式', 'error');
       toast('中文文本已通过剪贴板粘贴（需焦点在手机输入框）', 'ok');
     } else {
@@ -715,13 +683,12 @@ function openMirror(serial, opts = {}) {
   $('mm-paste').onclick = async () => {
     if (!State.mirror) return;
     let text = $('mm-text').value;
-    if (!text) {
-      try { text = await navigator.clipboard.readText(); } catch (e) {}
-    }
+    if (!text) { try { text = await navigator.clipboard.readText(); } catch (e) {} }
     if (!text) return toast('请先填写文本或复制内容到 PC 剪贴板', 'error');
     if (State.mirror.fallback) return toast('粘贴需要实时投屏模式（快照模式无控制通道）', 'error');
     if (State.mirror.pasteText(text)) toast('已写入手机剪贴板并执行粘贴（需焦点在输入框）', 'ok');
   };
+
   $('mm-clipboard').onclick = () => {
     const t = $('mm-text').value;
     if (t && State.mirror) State.mirror.setClipboard(t);
