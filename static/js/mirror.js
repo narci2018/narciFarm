@@ -92,6 +92,7 @@ class Mirror {
   }
 
   async connect() {
+    Diag.send('open', { mode: 'realtime' });
     if (!('VideoDecoder' in window)) {
       this._startFallback('浏览器不支持 WebCodecs');
       return;
@@ -109,7 +110,10 @@ class Mirror {
         this._onBinary(ev.data);
       }
     };
-    this.ws.onclose = () => { if (!this.closed) this._startFallback('连接断开'); };
+    this.ws.onclose = (ev) => {
+      Diag.send('wsclose', { code: ev && ev.code, reason: (ev && ev.reason) || '' });
+      if (!this.closed) this._startFallback('连接断开');
+    };
     this.ws.onerror = () => {};
     this._bindInput();
   }
@@ -187,34 +191,37 @@ class Mirror {
     cv.style.touchAction = 'none';
     cv.oncontextmenu = (e) => e.preventDefault();
 
-    cv.addEventListener('pointerdown', (e) => {
-      if (this.fallback) return;
-      cv.setPointerCapture(e.pointerId);
-      const { nx, ny } = this._norm(e);
+    const startGesture = (nx, ny) => {
       this._gesture = { x0: nx, y0: ny, t0: performance.now(), moved: false };
-    });
-    cv.addEventListener('pointermove', (e) => {
-      if (!this._gesture) return;
+    };
+    // PointerEvent 优先；同时常备鼠标兜底（带去重），覆盖不支持/异常的浏览器环境
+    if ('PointerEvent' in window) {
+      cv.addEventListener('pointerdown', (e) => {
+        if (this.fallback) return;
+        // 部分环境 setPointerCapture 会抛错：绝不能因此丢弃整个手势
+        try { cv.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        const { nx, ny } = this._norm(e);
+        startGesture(nx, ny);
+        Diag.press('pointer');
+      });
+      cv.addEventListener('pointercancel', () => { this._gesture = null; });
+    }
+    cv.addEventListener('mousedown', (e) => {
+      if (this.fallback) return;
+      if (Date.now() - (this._pointerHandledAt || 0) < 300) return; // 同一次点击已被 Pointer 路径处理
       const { nx, ny } = this._norm(e);
-      if (Math.hypot(nx - this._gesture.x0, ny - this._gesture.y0) > 0.012) this._gesture.moved = true;
-      this._gesture.x1 = nx; this._gesture.y1 = ny;
+      startGesture(nx, ny);
+      Diag.press('mouse');
+    });
+    cv.addEventListener('mouseup', (e) => {
+      if (!this._gesture) return;
+      if (Date.now() - (this._pointerHandledAt || 0) < 300) return;
+      this._endGesture(e);
     });
     cv.addEventListener('pointerup', (e) => {
       if (!this._gesture) return;
-      const g = this._gesture; this._gesture = null;
-      const { nx, ny } = this._norm(e);
-      const dur = Math.max(60, Math.round(performance.now() - g.t0));
-      rippleAt(this.stage, e.clientX, e.clientY);
-      if (g.moved) {
-        this.inject('swipe', {
-          x_pct: +g.x0.toFixed(4), y_pct: +g.y0.toFixed(4),
-          x2_pct: +nx.toFixed(4), y2_pct: +ny.toFixed(4), duration_ms: dur,
-        });
-        this._record({ type: 'swipe', x_pct: +g.x0.toFixed(4), y_pct: +g.y0.toFixed(4), x2_pct: +nx.toFixed(4), y2_pct: +ny.toFixed(4), duration_ms: dur });
-      } else {
-        this.inject('tap', { x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) });
-        this._record({ type: 'tap', x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) });
-      }
+      this._pointerHandledAt = Date.now();
+      this._endGesture(e);
     });
     cv.addEventListener('wheel', (e) => {
       e.preventDefault();
@@ -227,6 +234,25 @@ class Mirror {
         duration_ms: 120,
       });
     }, { passive: false });
+  }
+
+  _endGesture(e) {
+    const g = this._gesture; this._gesture = null;
+    const { nx, ny } = this._norm(e);
+    const dur = Math.max(60, Math.round(performance.now() - g.t0));
+    rippleAt(this.stage, e.clientX, e.clientY);
+    if (g.moved) {
+      const p = {
+        x_pct: +g.x0.toFixed(4), y_pct: +g.y0.toFixed(4),
+        x2_pct: +nx.toFixed(4), y2_pct: +ny.toFixed(4), duration_ms: dur,
+      };
+      this.inject('swipe', p);
+      this._record(Object.assign({ type: 'swipe' }, p));
+    } else {
+      const p = { x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) };
+      this.inject('tap', p);
+      this._record(Object.assign({ type: 'tap' }, p));
+    }
   }
 
   _norm(e) {
@@ -275,6 +301,7 @@ class Mirror {
 
   _startFallback(reason) {
     if (this.fallback || this.closed) return;
+    Diag.send('fallback', { reason: String(reason || '').slice(0, 80) });
     console.warn('mirror fallback:', reason);
     this.fallback = new SnapshotMirror(this.serial, this.canvas, this.opts);
     this.fallback.start();
@@ -325,19 +352,10 @@ class SnapshotMirror {
     const cv = this.canvas;
     cv.style.touchAction = 'none';
     cv.oncontextmenu = (e) => e.preventDefault();
-    cv.onpointerdown = (e) => {
-      cv.setPointerCapture(e.pointerId);
-      const { nx, ny } = this._norm(e);
+    const startGesture = (nx, ny) => {
       this.gesture = { x0: nx, y0: ny, t0: performance.now(), moved: false };
     };
-    cv.onpointermove = (e) => {
-      if (!this.gesture) return;
-      const { nx, ny } = this._norm(e);
-      if (Math.hypot(nx - this.gesture.x0, ny - this.gesture.y0) > 0.02) this.gesture.moved = true;
-      this.gesture.x1 = nx; this.gesture.y1 = ny;
-    };
-    cv.onpointerup = (e) => {
-      if (!this.gesture) return;
+    const endGesture = (e) => {
       const g = this.gesture; this.gesture = null;
       const { nx, ny } = this._norm(e);
       const dur = Math.max(60, Math.round(performance.now() - g.t0));
@@ -352,6 +370,38 @@ class SnapshotMirror {
         sendInput(this.targets(), 'tap', { x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) }, this.opts.onInjectFeedback);
         this._record({ type: 'tap', x_pct: +nx.toFixed(4), y_pct: +ny.toFixed(4) });
       }
+    };
+    // Pointer 优先 + 鼠标兜底（去重）；setPointerCapture 失败不丢弃手势
+    if ('PointerEvent' in window) {
+      cv.onpointerdown = (e) => {
+        try { cv.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        const { nx, ny } = this._norm(e);
+        startGesture(nx, ny);
+        Diag.press('pointer');
+      };
+      cv.onpointercancel = () => { this.gesture = null; };
+      cv.onpointermove = (e) => {
+        if (!this.gesture) return;
+        const { nx, ny } = this._norm(e);
+        if (Math.hypot(nx - this.gesture.x0, ny - this.gesture.y0) > 0.02) this.gesture.moved = true;
+        this.gesture.x1 = nx; this.gesture.y1 = ny;
+      };
+      cv.onpointerup = (e) => {
+        if (!this.gesture) return;
+        this._pointerHandledAt = Date.now();
+        endGesture(e);
+      };
+    }
+    cv.onmousedown = (e) => {
+      if (Date.now() - (this._pointerHandledAt || 0) < 300) return;
+      const { nx, ny } = this._norm(e);
+      startGesture(nx, ny);
+      Diag.press('mouse');
+    };
+    cv.onmouseup = (e) => {
+      if (!this.gesture) return;
+      if (Date.now() - (this._pointerHandledAt || 0) < 300) return;
+      endGesture(e);
     };
   }
   targets() {

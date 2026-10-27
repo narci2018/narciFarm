@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -46,10 +46,12 @@ async def _scale_xy(serial: str, step: dict) -> tuple[int, int]:
 async def _input_action(serial: str, action: str, params: dict) -> Optional[str]:
     """执行单台设备的输入动作。
 
-    先经 ensure_awake 守卫（熄屏时注入会 rc=0 但无效，需先唤醒）。
+    先经 ensure_awake 守卫（熄屏时注入会 rc=0 但无效，需先唤醒）；
+    power 键本身是亮/熄屏开关，例外跳过守卫（否则熄屏时按 power 会先被唤醒、再亮屏，语义错误）。
     返回附加说明（如“设备熄屏已自动唤醒”），正常情况下为 None。
     """
-    note = await adb.ensure_awake(serial)
+    note = None if action == "key" and str(params.get("keycode", params.get("key", ""))) == "power" \
+        else await adb.ensure_awake(serial)
     if action == "tap":
         x, y = await _scale_xy(serial, params)
         await adb.input_tap(serial, x, y)
@@ -168,6 +170,20 @@ async def api_settings():
         "max_size": MAX_SIZE, "bitrate": VIDEO_BITRATE, "fps": MAX_FPS,
         "snapshot_interval": SNAPSHOT_INTERVAL,
     }
+
+
+@app.post("/api/diag")
+async def api_diag(request: Request):
+    """浏览器侧诊断上报（点击/页面错误/UA），写入服务日志，用于定位“点了没反应”类问题。"""
+    try:
+        data = await request.json()
+    except Exception:  # noqa: BLE001
+        data = {}
+    ua = str(data.get("ua", ""))[:160]
+    path = str(data.get("path", ""))[:40]
+    payload = data.get("payload") or {}
+    bus.warn(f"[前端诊断] {path} {json.dumps(payload, ensure_ascii=False)[:300]} | UA={ua}")
+    return {"ok": True}
 
 
 @app.get("/api/devices")
