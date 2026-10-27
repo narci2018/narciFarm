@@ -99,8 +99,7 @@ async def refresh_devices() -> int:
         else:
             db.touch_device(serial)
         if d["state"] == "device":
-            if serial not in _open_server_jars:
-                asyncio.create_task(ensure_jar_pushed(serial))  # 预推送，打开投屏即免 push
+            asyncio.create_task(ensure_jar_pushed(serial))  # 预推送(幂等)，打开投屏即免 push
             if time.time() - _info_fetch_at.get(serial, 0) > 300:
                 try:
                     info = await adb.get_build_info(serial)

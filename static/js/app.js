@@ -637,26 +637,40 @@ function openMirror(serial, opts = {}) {
     $('mirror-modal').classList.add('hidden');
   };
 
-  // ===== 弹窗拖拽移动（标题栏）+ 原生 resize:both 缩放（右下角） =====
+  // ===== 弹窗移动/缩放（document 级 mouse 事件 + 专用手柄，全环境可靠） =====
   const mv = $('mirror-modal');
   const bar = mv.querySelector('.mirror-bar');
-  let dragState = null;
-  bar.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('button, input, select, label, a')) return;
+  const rz = $('mm-resize-handle');
+  let winDrag = null;
+  bar.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest('button, input, select, label, a, textarea')) return;
     const r = mv.getBoundingClientRect();
-    dragState = { dx: e.clientX - r.left, dy: e.clientY - r.top };
-    bar.setPointerCapture(e.pointerId);
-    bar.style.cursor = 'grabbing';
+    winDrag = { mode: 'move', dx: e.clientX - r.left, dy: e.clientY - r.top };
+    e.preventDefault();
   });
-  bar.addEventListener('pointermove', (e) => {
-    if (!dragState) return;
-    const x = Math.min(Math.max(e.clientX - dragState.dx, 0), window.innerWidth - 60);
-    const y = Math.min(Math.max(e.clientY - dragState.dy, 0), window.innerHeight - 40);
-    mv.style.left = x + 'px';
-    mv.style.top = y + 'px';
-    mv.style.transform = 'none';
+  rz.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    const r = mv.getBoundingClientRect();
+    winDrag = { mode: 'resize', sx: e.clientX, sy: e.clientY, sw: r.width, sh: r.height };
+    e.preventDefault();
   });
-  bar.addEventListener('pointerup', () => { dragState = null; bar.style.cursor = ''; });
+  document.addEventListener('mousemove', (e) => {
+    if (!winDrag) return;
+    if (winDrag.mode === 'move') {
+      const x = Math.min(Math.max(e.clientX - winDrag.dx, 0), window.innerWidth - 60);
+      const y = Math.min(Math.max(e.clientY - winDrag.dy, 0), window.innerHeight - 40);
+      mv.style.left = x + 'px';
+      mv.style.top = y + 'px';
+      mv.style.transform = 'none';
+    } else {
+      const w = Math.min(Math.max(winDrag.sw + (e.clientX - winDrag.sx), 380), window.innerWidth * 0.96);
+      const h = Math.min(Math.max(winDrag.sh + (e.clientY - winDrag.sy), 260), window.innerHeight * 0.92);
+      mv.style.width = w + 'px';
+      mv.style.height = h + 'px';
+    }
+  });
+  document.addEventListener('mouseup', () => { winDrag = null; });
 
   // ===== 其余工具条绑定（含关闭/加载遮罩收口） =====
   const closeMirror = () => {

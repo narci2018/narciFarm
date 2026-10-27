@@ -110,12 +110,19 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
   padding: 10px; z-index: 100;
   min-width: 380px; min-height: 260px; max-width: 96vw; max-height: 92vh;
-  resize: both; overflow: auto;
+  width: max-content;
+  overflow: auto;
   cursor: default; user-select: none;
   box-shadow: 0 8px 40px rgba(0,0,0,.6);
 }
 .mirror-move.hidden { display: none; }
 .mirror-move .mirror-bar { cursor: grab; }
+.mirror-resize-handle { position: absolute; right: 1px; bottom: 1px; width: 18px; height: 18px;
+  cursor: nwse-resize; z-index: 15; touch-action: none;
+  background:
+    linear-gradient(135deg, transparent 0 55%, var(--dim) 55% 60%, transparent 60% 68%, var(--dim) 68% 73%, transparent 73%);
+  border-left: 1px solid var(--line); border-top: 1px solid var(--line);
+  border-bottom-right-radius: 12px; }
 .mirror-move .mirror-bar:active { cursor: grabbing; }
 /* 加载遮罩（连接中可见：旋转指示 + 秒表 + 取消） */
 .mm-loading { position: absolute; inset: 0; background: rgba(15,18,22,.93); z-index: 20;
