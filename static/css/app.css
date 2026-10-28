@@ -224,3 +224,8 @@ html, body, .mirror-move, .device-list, .group-list, .console-out, .result-box,
 .device-list li .btn.small { flex-shrink: 0; margin-left: 4px; }
 
 .dnote { font-size: 10px; color: var(--warn); max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 开发工具: 性能卡片 */
+.perf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-top: 8px; }
+.perf-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+.perf-label { font-size: 11px; color: var(--dim); margin-bottom: 4px; }

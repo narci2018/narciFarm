@@ -726,6 +726,74 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
 
 
+
+
+# ---------- 开发工具: ADB 隧道 / logcat / 文件 / 性能 / 启动耗时 ----------
+
+
+
+@app.get("/api/devices/{serial}/logcat")
+async def api_logcat(serial: str, lines: int = 300, level: str = "V", filter: str = ""):
+    args = ["logcat", "-d", "-t", str(min(max(lines, 10), 2000)), f"*:{level}"]
+    if filter:
+        args.append(filter)
+    rc, out = await adb.shell(serial, " ".join(args), timeout=20)
+    return {"lines": out.splitlines()[-min(max(lines, 10), 2000):]}
+
+
+@app.get("/api/devices/{serial}/files")
+async def api_list_files(serial: str, path: str = "/sdcard"):
+    return {"path": path, "entries": await adb.list_dir(serial, path)}
+
+
+@app.post("/api/devices/{serial}/files/upload")
+async def api_upload(serial: str, path: str = Form("/sdcard"), file: UploadFile = File(...)):
+    dest = path.rstrip("/") + "/" + file.filename
+    tmp = UPLOADS_DIR / file.filename
+    with open(tmp, "wb") as f:
+        while chunk := await file.read(1 << 20):
+            f.write(chunk)
+    await adb.push(serial, str(tmp), dest)
+    return {"ok": True, "path": dest}
+
+
+@app.get("/api/devices/{serial}/files/download")
+async def api_download(serial: str, path: str):
+    import tempfile
+    tmp = Path(tempfile.mkdtemp()) / Path(path).name
+    await adb.pull_file(serial, path, str(tmp))
+    return FileResponse(str(tmp), filename=Path(path).name)
+
+
+@app.post("/api/devices/{serial}/files/mkdir")
+async def api_mkdir(serial: str, body: dict):
+    await adb.mkdir(serial, body.get("path", "/sdcard/NewFolder"))
+    return {"ok": True}
+
+
+@app.delete("/api/devices/{serial}/files")
+async def api_delete_file(serial: str, path: str = ""):
+    if not path:
+        raise HTTPException(400, "缺少路径")
+    await adb.remove_path(serial, path)
+    return {"ok": True}
+
+
+@app.get("/api/devices/{serial}/metrics")
+async def api_metrics(serial: str):
+    m = await adb.get_metrics(serial)
+    client = hub.get(serial)
+    if client:
+        m["fps"] = round(client.fps(), 1)
+        m["streaming"] = True
+    return m
+
+
+@app.post("/api/devices/{serial}/startup_time")
+async def api_startup_time(serial: str, body: dict):
+    return await adb.startup_time(serial, body.get("package", ""), cold=bool(body.get("cold", True)))
+
+
 @app.get("/metrics")
 async def api_metrics():
     """Prometheus 指标(text/plain)。"""

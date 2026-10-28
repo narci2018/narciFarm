@@ -53,6 +53,7 @@
       <button class="tab" data-tab="schedule">定时调度</button>
       <button class="tab" data-tab="console">ADB 控制台</button>
       <button class="tab" data-tab="apps">应用管理</button>
+      <button class="tab" data-tab="devtools">开发工具</button>
       <button class="tab" data-tab="captures">截图库</button>
       <button class="tab" data-tab="logs">日志</button>
     </nav>
@@ -218,6 +219,50 @@
           <button id="cs-run" class="btn primary">执行</button>
         </div>
         <pre id="cs-out" class="console-out"></pre>
+      </div>
+    </section>
+
+    <section id="tab-devtools" class="tabpane">
+      <div class="pane-card">
+        <div class="form-row">
+          <label>设备</label><select id="dt-device"></select>
+          <span class="hint" id="dt-serial-hint"></span>
+        </div>
+        <h4>ADB 集成</h4>
+        <div class="hint">设备已接入本地 adb 服务器, Android Studio / adb 命令行可直接使用(序列号见下)。</div>
+        <div class="form-row">
+          <span class="dserial" id="dt-serial" style="font-size:13px"></span>
+          <button class="btn small" data-cmd="shell">复制 shell 命令</button>
+          <button class="btn small" data-cmd="install">复制 install 命令</button>
+          <button class="btn small" data-cmd="logcat">复制 logcat 命令</button>
+          <button class="btn small" data-cmd="forward">复制 forward 命令</button>
+        </div>
+        <h4>启动耗时测量</h4>
+        <div class="form-row">
+          <input id="dt-package" placeholder="包名, 如 com.android.settings">
+          <button class="btn small" id="dt-startup-cold">冷启动</button>
+          <button class="btn small" id="dt-startup-warm">热启动</button>
+          <span class="hint" id="dt-startup-result"></span>
+        </div>
+        <h4>性能监控</h4>
+        <div id="dt-metrics" class="hint">加载中…</div>
+        <div class="perf-grid" id="dt-perf"></div>
+        <h4>logcat</h4>
+        <div class="form-row">
+          <select id="dt-log-level"><option value="V">Verbose</option><option value="D">Debug</option><option value="I" selected>Info</option><option value="W">Warn</option><option value="E">Error</option></select>
+          <input id="dt-log-filter" placeholder="关键字过滤">
+          <button class="btn small" id="dt-log-refresh">刷新</button>
+          <label class="chk"><input type="checkbox" id="dt-log-live"> 实时(3s)</label>
+        </div>
+        <pre id="dt-logcat" class="console-out" style="height:240px"></pre>
+        <h4>文件管理</h4>
+        <div class="form-row">
+          <input id="dt-path" value="/sdcard" style="flex:1">
+          <button class="btn small" id="dt-file-refresh">列出</button>
+          <button class="btn small" id="dt-file-mkdir">新建文件夹</button>
+          <label class="btn small filelabel">上传文件<input type="file" id="dt-file-upload" hidden></label>
+        </div>
+        <table class="data-table" id="dt-files"><thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody></tbody></table>
       </div>
     </section>
 

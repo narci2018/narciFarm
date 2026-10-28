@@ -53,6 +53,7 @@ async function init() {
   bindSchedule();
   bindConsole();
   bindApps();
+  bindDevTools();
   bindCaptures();
   bindModal();
   connectEventStream();
@@ -224,7 +225,7 @@ function bindOverview() {
 
 function fillDeviceSelects() {
   const online = State.devices.filter(d => d.state === 'device');
-  for (const [selId] of [['bc-master'], ['cs-device'], ['am-device']]) {
+  for (const [selId] of [['bc-master'], ['cs-device'], ['am-device'], ['dt-device']]) {
     const sel = $(selId);
     if (!sel) continue;
     const cur = sel.value;
@@ -290,6 +291,7 @@ function bindTabs() {
       $(`tab-${tab.dataset.tab}`).classList.add('active');
       if (tab.dataset.tab === 'captures') loadCaptures();
       if (tab.dataset.tab === 'apps') loadApps();
+      if (tab.dataset.tab === 'devtools') refreshDevTools();
       if (tab.dataset.tab === 'schedule') refreshSchedules();
     };
   });
@@ -902,6 +904,153 @@ function showPrompt(opts) {
     inp.onkeydown = (e) => { if (e.key === 'Enter') done(inp.value); };
     modal.onclick = (e) => { if (e.target === modal) done(null); };
   });
+}
+
+
+// ---------- 开发工具 ----------
+
+const PerfHistory = { cpu: [], mem: [], temp: [], fps: [] };
+const PERF_MAX = 60;
+
+function bindDevTools() {
+  $('dt-device').onchange = () => refreshDevTools();
+  $('dt-file-refresh').onclick = loadDeviceFiles;
+  $('dt-file-mkdir').onclick = async () => {
+    const serial = $('dt-device').value;
+    const name = await showPrompt({ title: '新建文件夹', message: $('dt-path').value, defaultValue: 'NewFolder' });
+    if (name) {
+      await API.post(`/api/devices/${encodeURIComponent(serial)}/files/mkdir`, { path: $('dt-path').value.replace(/\/$/, '') + '/' + name });
+      loadDeviceFiles();
+    }
+  };
+  $('dt-file-upload').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const serial = $('dt-device').value;
+    const fd = new FormData();
+    fd.append('path', $('dt-path').value);
+    fd.append('file', f);
+    await API.post(`/api/devices/${encodeURIComponent(serial)}/files/upload`, fd);
+    toast('上传完成', 'ok');
+    loadDeviceFiles();
+    e.target.value = '';
+  };
+  $('dt-log-refresh').onclick = loadLogcat;
+  $('dt-log-live').onchange = (e) => { State._logcatTimer && clearInterval(State._logcatTimer); if (e.target.checked) State._logcatTimer = setInterval(loadLogcat, 3000); };
+  $('dt-startup-cold').onclick = () => measureStartup(true);
+  $('dt-startup-warm').onclick = () => measureStartup(false);
+  document.querySelectorAll('#tab-devtools [data-cmd]').forEach(btn => {
+    btn.onclick = () => {
+      const serial = $('dt-device').value;
+      const templates = {
+        shell: `adb -s ${serial} shell`,
+        install: `adb -s ${serial} install xxx.apk`,
+        logcat: `adb -s ${serial} logcat`,
+        forward: `adb -s ${serial} forward tcp:8080 tcp:8080`,
+      };
+      navigator.clipboard && navigator.clipboard.writeText(templates[btn.dataset.cmd]);
+      toast(`已复制: ${templates[btn.dataset.cmd]}`, 'ok');
+    };
+  });
+  setInterval(pollMetrics, 2000);
+}
+
+async function refreshDevTools() {
+  const serial = $('dt-device').value;
+  if (!serial) return;
+  $('dt-serial').textContent = serial;
+  $('dt-serial-hint').textContent = 'PC 端任意 adb 工具可直接使用';
+  loadDeviceFiles();
+  loadLogcat();
+}
+
+async function measureStartup(cold) {
+  const serial = $('dt-device').value;
+  const pkg = $('dt-package').value.trim();
+  if (!pkg) return toast('请输入包名', 'error');
+  $('dt-startup-result').textContent = '测量中…';
+  try {
+    const r = await API.post(`/api/devices/${encodeURIComponent(serial)}/startup_time`, { package: pkg, cold });
+    $('dt-startup-result').textContent =
+      `${cold ? '冷' : '热'}启动: ${r.wait_ms >= 0 ? r.wait_ms + 'ms' : '-'}${r.total_ms > 0 ? ' (Total ' + r.total_ms + 'ms)' : ''} @ ${r.component}`;
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function loadLogcat() {
+  const serial = $('dt-device').value;
+  if (!serial) return;
+  try {
+    const r = await API.get(`/api/devices/${encodeURIComponent(serial)}/logcat?lines=300&level=${$('dt-log-level').value}&filter=${encodeURIComponent($('dt-log-filter').value || '')}`);
+    $('dt-logcat').textContent = r.lines.join(String.fromCharCode(10)) || '(无日志)';
+  } catch (e) {}
+}
+
+async function loadDeviceFiles() {
+  const serial = $('dt-device').value;
+  if (!serial) return;
+  const path = $('dt-path').value || '/sdcard';
+  try {
+    const r = await API.get(`/api/devices/${encodeURIComponent(serial)}/files?path=${encodeURIComponent(path)}`);
+    $('dt-path').value = r.path.replace(/\/$/, '') || '/';
+    const tb = $('dt-files').querySelector('tbody');
+    tb.innerHTML = '';
+    for (const e of r.entries) {
+      const tr = document.createElement('tr');
+      const size = e.dir ? '—' : e.size > 1048576 ? (e.size / 1048576).toFixed(1) + 'MB' : (e.size / 1024).toFixed(0) + 'KB';
+      tr.innerHTML = `<td class="${e.dir ? '' : 'dserial'}">${e.dir ? '📁 ' : ''}${esc(e.name)}</td><td>${size}</td><td class="hint">${esc(e.mtime)}</td>
+        <td style="white-space:nowrap">${e.dir ? '' : `<button class="btn small" data-dl="${esc(e.name)}">下载</button>`}<button class="btn small danger" data-del="${esc(e.name)}">删</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-dl]').forEach(b => b.onclick = () => {
+      window.open(`/api/devices/${encodeURIComponent(serial)}/files/download?path=${encodeURIComponent($('dt-path').value.replace(/\/$/, '') + '/' + b.dataset.dl)}`);
+    });
+    tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+      const ok = await showConfirm({ title: '删除', message: `确认删除 ${b.dataset.del}？`, okText: '删除', danger: true });
+      if (!ok) return;
+      await API.del(`/api/devices/${encodeURIComponent(serial)}/files?path=${encodeURIComponent($('dt-path').value.replace(/\/$/, '') + '/' + b.dataset.del)}`);
+      loadDeviceFiles();
+    });
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function pollMetrics() {
+  const serial = $('dt-device').value;
+  if (!serial || !$('tab-devtools').classList.contains('active')) return;
+  try {
+    const m = await API.get(`/api/devices/${encodeURIComponent(serial)}/metrics`);
+    const cpu = m.cpu_total_pct ?? 0;
+    const memUsed = m.mem_total_kb ? Math.round((1 - (m.mem_free_kb || 0) / m.mem_total_kb) * 100) : 0;
+    const temp = m.battery && m.battery.temperature ? (parseInt(m.battery.temperature) / 10).toFixed(1) : '—';
+    const fps = m.fps ?? 0;
+    pushPerf('cpu', cpu); pushPerf('mem', memUsed);
+    pushPerf('temp', parseFloat(temp) || 0); pushPerf('fps', fps);
+    $('dt-metrics').innerHTML = [
+      `CPU <b>${cpu}%</b>`, `内存 <b>${memUsed}%</b>`, `电池 <b>${m.battery ? m.battery.level : '—'}%</b>`,
+      `温度 <b>${temp}°C</b>`, `帧率 <b>${fps}</b>`, `充电 <b>${m.battery && m.battery.status === '2' ? '是' : '否'}</b>`,
+    ].map(x => `<span>${x}</span>`).join('');
+    renderPerf();
+  } catch (e) {}
+}
+
+function pushPerf(k, v) {
+  const arr = PerfHistory[k];
+  arr.push(v);
+  if (arr.length > PERF_MAX) arr.shift();
+}
+
+function sparkline(values, color, w = 120, h = 28) {
+  if (values.length < 2) return '';
+  const max = Math.max(...values, 1);
+  const pts = values.map((v, i) => `${(i / (values.length - 1)) * w},${h - (v / max) * h}`).join(' ');
+  return `<svg width="${w}" height="${h}" style="background:var(--panel2);border-radius:4px"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
+}
+
+function renderPerf() {
+  const box = $('dt-perf');
+  box.innerHTML = [
+    ['CPU %', PerfHistory.cpu, 'var(--acc)'], ['内存 %', PerfHistory.mem, 'var(--warn)'],
+    ['温度 °C', PerfHistory.temp, 'var(--bad)'], ['帧率', PerfHistory.fps, 'var(--ok)'],
+  ].map(([label, vals, color]) => `<div class="perf-card"><div class="perf-label">${label}</div>${sparkline(vals, color)}</div>`).join('');
 }
 
 init();

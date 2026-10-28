@@ -403,3 +403,98 @@ async def get_current_focus(serial: str) -> str:
     out = await _run_ok(["shell", "dumpsys", "window", "|", "grep", "-E", "mCurrentFocus"],
                         device=serial, timeout=10)
     return out.decode("utf-8", "replace").strip()
+
+# ---------- 开发工具: 文件管理 / 日志 / 性能 / 启动耗时 ----------
+
+_LS_RE = re.compile(r"^([dl-])([rwxstST-]{9,10})\s+\d+\s+(\S+)\s+(\S+)\s+(\d+)\s+"
+                    r"([\w\-: ]+\d{2}:\d{2})\s+(.+)$")
+
+
+async def list_dir(serial: str, path: str) -> list[dict]:
+    """列出设备目录(解析 ls -la)。/sdcard 等符号链接目录自动补 / 列出内容。"""
+    out_path = path.rstrip("/") + "/"
+    rc, out = await shell(serial, f"ls -la {shlex.quote(out_path)}", timeout=15)
+    entries = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("total"):
+            continue
+        m = _LS_RE.match(line)
+        if not m:
+            continue
+        ftype, perms, _uid, _gid, size, mtime, name = m.groups()
+        if name in (".", ".."):
+            continue
+        entries.append({
+            "name": name, "dir": ftype == "d", "size": int(size),
+            "mtime": mtime.replace(" ", "T"), "perms": perms, "link": ftype == "l",
+        })
+    entries.sort(key=lambda e: (not e["dir"], e["name"].lower()))
+    return entries
+
+
+async def pull_file(serial: str, remote: str, local: str, timeout: float = 120) -> None:
+    await _run_ok(["pull", remote, local], device=serial, timeout=timeout)
+
+
+async def mkdir(serial: str, path: str) -> None:
+    await _run_ok(["shell", f"mkdir -p {shlex.quote(path)}"], device=serial, timeout=15)
+
+
+async def remove_path(serial: str, path: str) -> None:
+    await _run_ok(["shell", f"rm -rf {shlex.quote(path)}"], device=serial, timeout=30)
+
+
+async def resolve_launch_activity(serial: str, package: str) -> str:
+    """返回应用的主 Activity 组件名(com.pkg/.MainActivity)。"""
+    rc, out = await shell(serial, f"cmd package resolve-activity --brief {shlex.quote(package)}", timeout=20)
+    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    for l in reversed(lines):
+        if "/" in l and "." in l:
+            return l
+    raise AdbError(f"未找到启动 Activity: {package}")
+
+
+async def startup_time(serial: str, package: str, cold: bool = True) -> dict:
+    """测量应用启动耗时(am start -W 的 TotalTime/WaitTime)。"""
+    if cold:
+        with contextlib.suppress(AdbError):
+            await stop_app(serial, package)
+        await asyncio.sleep(0.5)
+    comp = await resolve_launch_activity(serial, package)
+    rc, out = await shell(serial, f"am start -W -n {shlex.quote(comp)}", timeout=40)
+    total = re.search(r"TotalTime:\s*(\d+)", out)
+    wait = re.search(r"WaitTime:\s*(\d+)", out)
+    relaunch = re.search(r"thisTime:\s*(\d+)", out)
+    return {
+        "package": package, "component": comp, "cold": cold,
+        "total_ms": int(total.group(1)) if total else -1,
+        "wait_ms": int(wait.group(1)) if wait else -1,
+        "this_ms": int(relaunch.group(1)) if relaunch else -1,
+    }
+
+
+async def get_metrics(serial: str) -> dict:
+    """设备性能指标: CPU/内存/电池/温度。"""
+    _, cpu_out = await shell(serial, "dumpsys cpuinfo", timeout=15)
+    cpu_total = None
+    m = re.search(r"(\d+(?:\.\d+)?)%\s*TOTAL", cpu_out)
+    if m:
+        cpu_total = float(m.group(1))
+    _, mem_out = await shell(serial, "cat /proc/meminfo", timeout=15)
+    mem_total = mem_free = None
+    for line in mem_out.splitlines():
+        if line.startswith("MemTotal:"):
+            mem_total = int(re.search(r"(\d+)", line).group(1))
+        elif line.startswith("MemAvailable:"):
+            mem_free = int(re.search(r"(\d+)", line).group(1))
+            break
+    _, bat_out = await shell(serial, "dumpsys battery", timeout=15)
+    battery = {}
+    for key in ("level", "temperature", "status", "health"):
+        mm = re.search(rf"{key}:\s*(\S+)", bat_out)
+        if mm:
+            battery[key] = mm.group(1)
+    return {"cpu_total_pct": cpu_total, "mem_total_kb": mem_total, "mem_free_kb": mem_free,
+            "battery": battery}
+
