@@ -400,7 +400,7 @@ def _node_attrs(node: ET.Element) -> dict:
     }
 
 
-def _node_to_dict(node: ET.Element) -> dict:
+def _node_to_dict(node: ET.Element, depth: int = 0) -> dict:
     attrs = _node_attrs(node)
     bounds = node.get("bounds", "") or ""
     return {
@@ -408,6 +408,7 @@ def _node_to_dict(node: ET.Element) -> dict:
         "id": attrs["resource_id"],
         "desc": attrs["content_desc"],
         "bounds": bounds,
+        "depth": depth,
         "center": _parse_bounds(bounds),
         "clickable": node.get("clickable") == "true",
         "enabled": node.get("enabled") == "true",
@@ -431,12 +432,23 @@ async def _dump_xml(serial: str, timeout: float = 25) -> Optional[ET.Element]:
         return None
 
 
+def _walk_nodes(node: ET.Element, depth: int, out: list) -> None:
+    """按 XML 嵌套深度优先展开为扁平列表（保留层级，供前端还原树形）。"""
+    for child in list(node):
+        if child.tag != "node":
+            continue
+        out.append(_node_to_dict(child, depth))
+        _walk_nodes(child, depth + 1, out)
+
+
 async def dump_hierarchy(serial: str, timeout: float = 25) -> list[dict]:
-    """返回当前界面的控件树（扁平节点列表，含属性与中心坐标）。"""
+    """返回当前界面的控件树（扁平节点列表，含属性、中心坐标与层级深度）。"""
     root = await _dump_xml(serial, timeout=timeout)
     if root is None:
         return []
-    return [_node_to_dict(n) for n in root.iter("node")]
+    out: list[dict] = []
+    _walk_nodes(root, 0, out)
+    return out
 
 
 async def find_elements(serial: str, kind: str, value: str, contains: bool = False,

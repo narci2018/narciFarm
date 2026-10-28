@@ -46,6 +46,9 @@ FastAPI 后端 (narci/)
 | 断言增强（正则/包含/前后缀匹配、数值比较、软断言不中止） | Maestro / SoloPi / Espresso |
 | 录制器增强（控件级录制、框选模板、录制中插入断言/截图） | AirtestIDE / Appium Inspector / Maestro Studio |
 | 性能指标采集与报告（CPU/内存/电量/温度，运行期采样） | SoloPi / Appetizer insights |
+| 控件树可视化拾取器（树形展开/折叠、属性面板、一键生成步骤） | Appium Inspector / PocoHierarchyViewer |
+| 步骤插件机制（Python 模块扩展步骤类型，不覆盖内置） | Appium 插件 / SoloPi |
+| Python SDK（设备/场景/报告，标准库实现，CI 友好） | — |
 
 ## 快速开始
 

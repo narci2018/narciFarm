@@ -137,3 +137,23 @@ def test_selector_from_element_priority_order():
 
 def test_selector_from_element_ignores_blank_values():
     assert adb.selector_from_element({"id": "   ", "desc": "确定", "text": "", "class": ""})["kind"] == "desc"
+
+
+def test_hierarchy_preserves_depth(monkeypatch):
+    xml = (
+        '<hierarchy>'
+        '<node text="root" resource-id="r" class="FrameLayout" content-desc="" package="p" bounds="[0,0][100,100]">'
+        '<node text="mid" resource-id="m" class="LinearLayout" content-desc="" package="p" bounds="[0,0][50,50]">'
+        '<node text="leaf" resource-id="l" class="TextView" content-desc="" package="p" bounds="[0,0][20,20]"/>'
+        '</node>'
+        '<node text="sibling" resource-id="s" class="Button" content-desc="" package="p" bounds="[50,0][100,50]"/>'
+        '</node>'
+        '</hierarchy>'
+    )
+    root = ET.fromstring(xml)
+    monkeypatch.setattr(adb, "_dump_xml", _fake_dump(root))
+    nodes = asyncio.run(adb.dump_hierarchy("S"))
+    depths = {n["id"]: n["depth"] for n in nodes}
+    assert depths == {"r": 0, "m": 1, "l": 2, "s": 1}
+    # 扁平列表顺序为深度优先
+    assert [n["id"] for n in nodes] == ["r", "m", "l", "s"]

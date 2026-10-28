@@ -446,12 +446,35 @@
         <div class="form-row">
           <span class="hint" id="dt-el-count"></span>
           <span class="spacer"></span>
+          <label class="hint"><input type="checkbox" id="dt-tree-expand" checked> 展开</label>
           <span class="hint" id="dt-el-hint"></span>
+        </div>
+        <div class="split" style="align-items:flex-start">
+          <div class="pane-card narrow" style="min-width:340px">
+            <h4>控件树</h4>
+            <div id="dt-tree" class="tree-view hint">点击「刷新控件树」或「查找」</div>
+          </div>
+          <div class="pane-card grow">
+            <h4>选中节点</h4>
+            <div id="dt-node-detail" class="hint">在左侧树中点选一个节点</div>
+            <div class="form-row">
+              <button id="dt-node-tap" class="btn small">插入 tap_el 步骤</button>
+              <button id="dt-node-assert" class="btn small">插入 assert_el 步骤</button>
+              <button id="dt-node-press" class="btn small">点击该控件</button>
+            </div>
+          </div>
         </div>
         <table class="data-table" id="dt-el-table">
           <thead><tr><th>文本</th><th>资源ID</th><th>类名</th><th>中心</th><th>可点</th><th>操作</th></tr></thead>
           <tbody></tbody>
         </table>
+        <h4>步骤插件</h4>
+        <div class="hint">插件是放在插件目录下的 Python 文件，用 register(reg) 注册自定义步骤类型。插件只在内置类型不匹配时生效，不会覆盖原有行为。</div>
+        <div class="form-row">
+          <span class="hint" id="pg-dir"></span>
+          <button class="btn small" id="pg-refresh">刷新</button>
+        </div>
+        <div id="pg-list" class="hint">加载中…</div>
         <h4>OCR 坐标识别</h4>
         <div class="hint">返回带边界框与置信度的识别结果，可用于 ocr_tap 点击与区域核对。</div>
         <div class="form-row">
@@ -609,12 +632,12 @@
 </div>
 <!-- posthog-js 以 ES module 引入（无构建步骤）：importmap 把裸导入名指到本地 SDK 副本 -->
 <script type="importmap">
-{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=047"}}
+{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=049"}}
 </script>
-<script src="/static/js/api.js?v=047"></script>
-<script type="module" src="/static/js/analytics.js?v=047"></script>
-<script src="/static/js/mirror.js?v=047"></script>
-<script src="/static/js/scenario.js?v=047"></script>
-<script src="/static/js/app.js?v=047"></script>
+<script src="/static/js/api.js?v=049"></script>
+<script type="module" src="/static/js/analytics.js?v=049"></script>
+<script src="/static/js/mirror.js?v=049"></script>
+<script src="/static/js/scenario.js?v=049"></script>
+<script src="/static/js/app.js?v=049"></script>
 </body>
 </html>

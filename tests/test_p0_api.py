@@ -228,7 +228,11 @@ def test_metrics_endpoint(api, monkeypatch):
     async def fake_metrics(serial):
         return {"battery_pct": 77, "cpu_used_pct": 12.0}
 
+    async def fake_list():
+        return [{"serial": "DEV01", "state": "device"}]
+
     monkeypatch.setattr(nm.adb, "read_metrics", fake_metrics)
+    monkeypatch.setattr(nm.adb, "list_devices", fake_list)
     r = tc.get("/api/devices/DEV01/metrics", headers=headers)
     assert r.status_code == 200
     # 该端点直接返回指标字段（并附 fps/streaming），不包一层 metrics

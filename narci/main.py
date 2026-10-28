@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import adb, auth as _auth, db, reports, scenario, scheduler, vision
+from . import adb, auth as _auth, db, plugins, reports, scenario, scheduler, vision
 from .config import (CAPTURES_DIR, DEVICE_REFRESH_INTERVAL, HOST, MAX_FPS,
                      MAX_SIZE, PORT, SNAPSHOT_INTERVAL, STATIC_DIR,
                      UPLOADS_DIR, VIDEO_BITRATE)
@@ -146,6 +146,9 @@ async def lifespan(app: FastAPI):
         ph, salt = _auth.hash_password("admin")
         db.create_user("admin", ph, salt, "admin")
         bus.warn("已创建默认管理员: admin / admin —— 请尽快登录修改密码")
+    loaded = plugins.load_all()
+    if loaded:
+        bus.info(f"已加载步骤插件: {', '.join(loaded)}")
     bus.info(f"narciFarm 已启动: http://{HOST}:{PORT}")
     yield
     bus.info("lifespan 关闭: 停止后台任务与投屏会话")
@@ -155,7 +158,7 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-__version__ = "0.9.7"
+__version__ = "0.9.8"
 app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 
@@ -646,6 +649,23 @@ async def api_resolve_at(serial: str, body: dict, _=Depends(_auth.require_user))
 
 # ---------- 控件树 / 元素定位 ----------
 
+@app.get("/api/plugins")
+async def api_plugins(_=Depends(_auth.require_user)):
+    """已注册的步骤插件（内置步骤不在此列）。"""
+    from .plugins import REGISTRY
+    builtin = {
+        "tap", "swipe", "text", "key", "back", "home", "launch", "stop_app", "shell", "wait",
+        "screenshot", "tap_text", "loop", "wait_text", "assert_text", "rand_wait", "start_activity",
+        "tap_image", "wait_image", "assert_image", "find_image", "ocr_tap", "ocr_get", "ocr_find",
+        "tap_el", "wait_el", "assert_el", "swipe_el", "assert_value",
+    }
+    return {
+        "builtin": sorted(builtin),
+        "plugins": [p for p in REGISTRY.list() if p["name"] not in builtin],
+        "plugin_dir": str(plugins.plugin_dir()),
+    }
+
+
 @app.get("/api/devices/{serial}/hierarchy")
 async def api_hierarchy(serial: str, _=Depends(_auth.require_user)):
     nodes = await adb.dump_hierarchy(serial)
@@ -988,6 +1008,9 @@ async def api_delete_file(serial: str, path: str = ""):
 
 @app.get("/api/devices/{serial}/metrics")
 async def api_metrics(serial: str):
+    known = {d["serial"] for d in await adb.list_devices()}
+    if serial not in known:
+        raise HTTPException(404, "设备不存在或未连接")
     if db.agent_of(serial):
         r = await _proxy_to_agent(serial, "metrics", {})
         return {k: v for k, v in r.items() if k != "ok"}

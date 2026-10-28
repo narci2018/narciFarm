@@ -108,8 +108,10 @@ def validate_steps(steps: list) -> None:
     def _check(seq: list, depth: int = 0) -> None:
         if depth > 5:
             raise ScenarioError("loop 嵌套超过 5 层")
+        from .plugins import REGISTRY
+        known = STEP_TYPES | set(REGISTRY._handlers)
         for s in seq:
-            if not isinstance(s, dict) or s.get("type") not in STEP_TYPES:
+            if not isinstance(s, dict) or s.get("type") not in known:
                 raise ScenarioError(f"未知步骤类型: {s!r}")
             if s.get("type") == "loop":
                 if not isinstance(s.get("steps"), list):
@@ -300,6 +302,11 @@ async def _execute_step(step: dict, serial: str, size: tuple[int, int],
         return {"matches": res, "count": len(res)}
     if stype in ("tap_el", "wait_el", "assert_el", "swipe_el"):
         return await _execute_element_step(step, serial)
+    # 插件步骤：内置类型优先，未识别的交给注册表（插件不会覆盖内置行为）
+    from .plugins import REGISTRY
+    handler = REGISTRY.get(stype)
+    if handler is not None:
+        return await handler(step, serial, size, run_id)
     raise ScenarioError(f"未实现步骤: {stype}")
 
 

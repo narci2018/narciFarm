@@ -347,7 +347,7 @@ function bindTabs() {
       $(`tab-${tab.dataset.tab}`).classList.add('active');
       if (tab.dataset.tab === 'captures') loadCaptures();
       if (tab.dataset.tab === 'apps') loadApps();
-      if (tab.dataset.tab === 'devtools') refreshDevTools();
+      if (tab.dataset.tab === 'devtools') { refreshDevTools(); loadPlugins(); }
       if (tab.dataset.tab === 'scenario') loadTemplates();
       if (tab.dataset.tab === 'team') loadTeam();
       if (tab.dataset.tab === 'stats') loadStats();
@@ -1096,6 +1096,80 @@ function showPrompt(opts) {
 const PerfHistory = { cpu: [], mem: [], temp: [], fps: [] };
 const PERF_MAX = 60;
 
+State._treeNodes = [];
+State._selectedNode = null;
+
+function renderTree(nodes) {
+  State._treeNodes = nodes || [];
+  const box = $('dt-tree');
+  if (!nodes || !nodes.length) { box.className = 'tree-view hint'; box.textContent = '无数据'; return; }
+  box.className = 'tree-view';
+  const expandAll = $('dt-tree-expand').checked;
+  let html = '';
+  for (const n of nodes) {
+    if (n.depth > 12) continue;
+    const open = expandAll || n.depth === 0;
+    const label = n.text || n.desc || n.id || n.class || '(无文本)';
+    const cls = n.clickable ? 'clickable' : '';
+    html += `<div class="tree-node ${cls}" data-i="${State._treeNodes.indexOf(n)}" style="padding-left:${n.depth * 14}px">` +
+      `<span class="tree-toggle">${open ? '▾' : '▸'}</span>` +
+      `<span class="tree-label" title="${esc(n.id || n.class || '')}">${esc(label.slice(0, 40))}</span>` +
+      `<span class="hint">${esc(n.id || '')}</span></div>`;
+    if (!open) break;   // 折叠：遇到非展开层即停止渲染其后代
+  }
+  box.innerHTML = html || '<span class="hint">无节点</span>';
+  box.querySelectorAll('.tree-node').forEach(el => {
+    el.onclick = () => selectTreeNode(parseInt(el.dataset.i, 10));
+  });
+  box.querySelectorAll('.tree-toggle').forEach(el => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      const i = parseInt(el.parentElement.dataset.i, 10);
+      const n = State._treeNodes[i];
+      $('dt-tree-expand').checked = false;
+      selectTreeNode(i);
+      const nd = State._treeNodes[i];
+      nd._collapsed = !nd._collapsed;
+      renderTree(State._treeNodes.filter(x => !x._collapsed));
+    };
+  });
+}
+
+function selectTreeNode(i) {
+  const n = State._treeNodes[i];
+  State._selectedNode = n;
+  document.querySelectorAll('#dt-tree .tree-node').forEach(el =>
+    el.classList.toggle('active', parseInt(el.dataset.i, 10) === i));
+  if (!n) { $('dt-node-detail').textContent = '未选中节点'; return; }
+  $('dt-node-detail').innerHTML =
+    `<div class="form-row"><b>${esc(n.text || n.desc || '(无文本)')}</b></div>` +
+    `<table class="data-table"><tbody>` +
+    `<tr><td>文本</td><td>${esc(n.text || '')}</td></tr>` +
+    `<tr><td>资源ID</td><td>${esc(n.id || '')}</td></tr>` +
+    `<tr><td>描述</td><td>${esc(n.desc || '')}</td></tr>` +
+    `<tr><td>类名</td><td>${esc(n.class || '')}</td></tr>` +
+    `<tr><td>包名</td><td>${esc(n.package || '')}</td></tr>` +
+    `<tr><td>中心</td><td>${n.center ? n.center.join(', ') : '—'}</td></tr>` +
+    `<tr><td>边界</td><td>${esc(n.bounds || '')}</td></tr>` +
+    `<tr><td>属性</td><td>${n.clickable ? '可点击 ' : ''}${n.scrollable ? '可滚动 ' : ''}` +
+    `${n.enabled ? '启用 ' : ''}${n.checked ? '已选中' : ''}</td></tr>` +
+    `</tbody></table>`;
+}
+
+function selectedNodeSelector() {
+  const n = State._selectedNode;
+  if (!n) return null;
+  const rid = (n.id || '').trim();
+  if (rid) return { kind: 'id', value: rid, contains: false, index: 0 };
+  const desc = (n.desc || '').trim();
+  if (desc) return { kind: 'desc', value: desc, contains: false, index: 0 };
+  const text = (n.text || '').trim();
+  if (text) return { kind: 'text', value: text, contains: false, index: 0 };
+  const cls = (n.class || '').trim();
+  if (cls) return { kind: 'class', value: cls, contains: false, index: 0 };
+  return null;
+}
+
 async function refreshHierarchy() {
   const serial = $('dt-device').value;
   if (!serial) { $('dt-el-count').textContent = '请先选择设备'; return; }
@@ -1129,6 +1203,7 @@ async function findElements() {
 }
 
 function renderElementRows(nodes) {
+  renderTree(nodes);
   const tb = $('dt-el-table').querySelector('tbody');
   tb.innerHTML = nodes.length ? '' : '<tr><td colspan="6" class="hint">无结果</td></tr>';
   for (const n of nodes.slice(0, 200)) {
@@ -1148,6 +1223,21 @@ function renderElementRows(nodes) {
     };
     tb.appendChild(tr);
   }
+}
+
+async function loadPlugins() {
+  try {
+    const r = await API.get('/api/plugins');
+    $('pg-dir').textContent = r.plugin_dir;
+    const list = $('pg-list');
+    const names = (r.plugins || []).map(p => p.name);
+    list.className = 'hint';
+    list.innerHTML = names.length
+      ? '<b>已注册步骤类型：</b>' + names.map(esc).join(', ') +
+        '<br><span class="hint">这些类型可直接在场景步骤中使用（例如 ' +
+        names.slice(0, 3).map(n => '{ "type": "' + esc(n) + '" }').join('、') + '）。</span>'
+      : '暂无插件。把 .py 插件放到上面的目录并重启服务即可扩展步骤类型。';
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 async function runOcr() {
@@ -1208,9 +1298,33 @@ function bindDevTools() {
   $('dt-startup-cold').onclick = () => measureStartup(true);
   $('dt-startup-warm').onclick = () => measureStartup(false);
   $('dt-el-find').onclick = findElements;
+  $('dt-node-tap').onclick = () => {
+    const sel = selectedNodeSelector();
+    if (!sel) return toast('请先选中一个节点', 'error');
+    ScenarioEditor.steps.push(Object.assign({ type: 'tap_el' }, sel));
+    ScenarioEditor._syncRaw(); ScenarioEditor.render();
+    toast('已插入 tap_el 步骤', 'ok');
+  };
+  $('dt-node-assert').onclick = () => {
+    const sel = selectedNodeSelector();
+    if (!sel) return toast('请先选中一个节点', 'error');
+    ScenarioEditor.steps.push(Object.assign({ type: 'assert_el', expect: 'exists' }, sel));
+    ScenarioEditor._syncRaw(); ScenarioEditor.render();
+    toast('已插入 assert_el 步骤', 'ok');
+  };
+  $('dt-node-press').onclick = async () => {
+    const n = State._selectedNode;
+    const serial = $('dt-device').value;
+    if (!n || !serial) return toast('请先选中节点与设备', 'error');
+    try {
+      await API.post('/api/input', { serials: [serial], action: 'tap', params: { x: n.center[0], y: n.center[1] } });
+      toast('已点击该控件', 'ok');
+    } catch (e) { toast(e.message, 'error'); }
+  };
   $('dt-el-tree').onclick = refreshHierarchy;
   $('dt-el-value').onkeydown = (e) => { if (e.key === 'Enter') findElements(); };
   $('dt-ocr-run').onclick = runOcr;
+  $('pg-refresh').onclick = loadPlugins;
   document.querySelectorAll('#tab-devtools [data-cmd]').forEach(btn => {
     btn.onclick = () => {
       const serial = $('dt-device').value;

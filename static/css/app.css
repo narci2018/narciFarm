@@ -279,3 +279,25 @@ html, body, .mirror-move, .device-list, .group-list, .console-out, .result-box,
   pointer-events: none;
   z-index: 5;
 }
+
+/* 控件树视图 */
+.tree-view {
+  max-height: 380px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tree-node:hover { background: var(--hover, rgba(255,255,255,0.06)); }
+.tree-node.active { background: var(--accent, #4da3ff); color: #fff; }
+.tree-node.clickable .tree-label::after { content: ' ●'; color: var(--acc, #4da3ff); font-size: 9px; }
+.tree-toggle { width: 12px; flex: none; color: #888; }
+.tree-label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
