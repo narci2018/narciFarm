@@ -235,7 +235,7 @@ function snapshotTicker() {
     if (now - (State.lastShotAt[d.serial] || 0) < interval) continue;
     State.lastShotAt[d.serial] = now + Math.random() * 600;
     const card = document.querySelector(`.device-card[data-serial="${CSS.escape(d.serial)}"] img`);
-    if (card) card.src = `/api/devices/${encodeURIComponent(d.serial)}/screenshot.png?t=${Date.now()}`;
+    if (card) card.src = `/api/devices/${encodeURIComponent(d.serial)}/screenshot.png?t=${Date.now()}&token=${encodeURIComponent(AuthToken.get() || '')}`;
   }
 }
 
@@ -846,6 +846,8 @@ function openMirror(serial, opts = {}) {
   };
   $('mm-close').onclick = closeMirror;
   $('mm-quality').onchange = () => localStorage.setItem(`narciFarm.quality.${serial}`, $('mm-quality').value);
+  $('mm-direct').checked = localStorage.getItem('narciFarm.direct') !== '0';
+  $('mm-direct').onchange = () => localStorage.setItem('narciFarm.direct', $('mm-direct').checked ? '1' : '0');
   $('mm-screen-on').onclick = () => State.mirror && State.mirror.send({ action: 'screen_power', on: true });
   $('mm-screen-off').onclick = () => State.mirror && State.mirror.send({ action: 'screen_power', on: false });
 
@@ -1170,7 +1172,11 @@ function showMain() {
     badge.className = 'hint ' + (State.user.role === 'admin' ? 'ok' : '');
   }
   $('tab-team-btn').classList.toggle('hidden', State.user.role !== 'admin');
+  if (!State._inited) {
+    State._inited = true;
+    init();
   }
+}
 
 async function doLogin() {
   const username = $('login-user').value.trim();

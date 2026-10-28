@@ -169,8 +169,27 @@ class Mirror {
       this._startFallback('浏览器不支持 WebCodecs');
       return;
     }
+    // 直连优先: 远程设备直连所属 Agent(省中心带宽), 失败回退中心中继
+    const useDirect = this.opts.direct !== false && localStorage.getItem('narciFarm.direct') !== '0';
+    if (useDirect) {
+      try {
+        const r = await API.get(`/api/devices/${encodeURIComponent(this.serial)}/direct_token`);
+        const base = r.agent_url.startsWith('https') ? 'wss://' + r.agent_url.slice(8)
+                                                       : 'ws://' + r.agent_url.slice(7);
+        this._setupWs(`${base}/agent/mirror/${this.serial}?direct=${encodeURIComponent(r.token)}`);
+        this._wsMode = 'direct';
+        return;
+      } catch (e) {
+        console.warn('[narci] 直连失败, 回退中心中继:', e.message);
+      }
+    }
     const q = (this.opts.quality || 'medium');
-    this.ws = new WebSocket(API.wsAuthed(`/ws/mirror/${this.serial}?control=1&quality=${q}`));
+    this._setupWs(API.wsAuthed(`/ws/mirror/${this.serial}?control=1&quality=${q}`));
+    this._wsMode = 'relay';
+  }
+
+  _setupWs(url) {
+    this.ws = new WebSocket(url);
     this.ws.binaryType = 'arraybuffer';
     this.ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {

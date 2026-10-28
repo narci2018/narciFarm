@@ -155,13 +155,30 @@ def _dispatch_command(cmd: str, params: dict):
     return asyncio.run(_run())
 
 
-def _check_secret(request) -> None:
-    """校验共享密钥(配置后生效)。支持 Header 或 WS query 传参。"""
+def _check_secret(request, serial: str = "") -> None:
+    """校验共享密钥(配置后生效)。支持 Header、secret query 或短期直连令牌 direct=token:exp。"""
     if not AGENT_SECRET:
         return
-    got = request.headers.get("X-Narci-Secret", "") or request.query_params.get("secret", "")
-    if got != AGENT_SECRET:
-        raise HTTPException(401, "Agent 密钥错误")
+    got = (request.headers.get("X-Narci-Secret", "")
+           or request.query_params.get("secret", "")
+           or request.query_params.get("direct", ""))
+    if got == AGENT_SECRET:
+        return
+    # 短期直连令牌: hmac(secret, "serial:exp")[:24] + ":" + exp, 60 秒有效
+    if ":" in got and serial:
+        import hashlib
+        import hmac
+        import time as _t
+        try:
+            tok, exp = got.rsplit(":", 1)
+            if int(exp) >= int(_t.time()):
+                expect = hmac.new(AGENT_SECRET.encode(), f"{serial}:{exp}".encode(),
+                                  hashlib.sha256).hexdigest()[:24]
+                if hmac.compare_digest(tok, expect):
+                    return
+        except Exception:
+            pass
+    raise HTTPException(401, "Agent 密钥错误")
 
 
 def create_agent_app() -> FastAPI:
@@ -180,7 +197,7 @@ def create_agent_app() -> FastAPI:
 
     @app.post("/agent/command")
     async def agent_command(body: dict, request: Request):
-        _check_secret(request)
+        _check_secret(request, str(body.get("params", {}).get("serial", "")))
         try:
             result = await asyncio.get_event_loop().run_in_executor(None, _dispatch_command,
                                                                     body.get("cmd", ""), body.get("params", {}))
@@ -190,7 +207,7 @@ def create_agent_app() -> FastAPI:
 
     @app.websocket("/agent/mirror/{serial}")
     async def agent_mirror(ws: WebSocket, serial: str):
-        _check_secret(ws)
+        _check_secret(ws, serial)
         await ws.accept()
         client = await hub.acquire(serial, control=True)
         queue = hub.subscribe(serial)

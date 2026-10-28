@@ -943,6 +943,9 @@ async def auth_middleware(request, call_next):
     path = request.url.path
     if path.startswith("/api/") and path not in ("/api/login", "/api/agents/heartbeat"):
         user = _auth.user_from_token(_auth.extract_token(request))
+        # 截图端点经 <img> 加载无法带 Header, 允许 ?token= 传参
+        if not user and "/screenshot.png" in path:
+            user = _auth.user_from_token(request.query_params.get("token"))
         if not user:
             return JSONResponse({"detail": "未登录或会话已过期"}, status_code=401)
         request.state.user = user
@@ -1157,10 +1160,11 @@ async def _proxy_mirror(ws: WebSocket, serial: str, agent: dict, quality: str) -
     raw = agent["url"].rstrip("/")
     ws_url = ("wss://" + raw[len("https://"):]) if raw.startswith("https://") else              ("ws://" + raw[len("http://"):]) if raw.startswith("http://") else raw
     url = ws_url + f"/agent/mirror/{serial}"
+    if AGENT_SECRET:
+        url += f"?secret={AGENT_SECRET}"
     try:
         import websockets
-        extra_headers = {"X-Narci-Secret": AGENT_SECRET} if AGENT_SECRET else None
-        async with websockets.connect(url, extra_headers=extra_headers) as agent_ws:
+        async with websockets.connect(url) as agent_ws:
             async def _to_browser():
                 async for msg in agent_ws:
                     if isinstance(msg, str):
@@ -1225,6 +1229,25 @@ async def api_usage_print(_=Depends(_auth.require_user)):
     """打印友好的报表数据(前端渲染后 window.print() 导出 PDF)。"""
     s = db.usage_summary()
     return {"summary": s, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+
+
+
+@app.get("/api/devices/{serial}/direct_token")
+async def api_direct_token(serial: str, _=Depends(_auth.require_user)):
+    """远程设备直连令牌: 中心用共享密钥签发短期 token(HMAC), 前端凭它直连 Agent,
+    长期密钥不下发到浏览器。token 60 秒有效。"""
+    agent = db.agent_of(serial)
+    if not agent:
+        raise HTTPException(404, "非远程设备")
+    from .config import AGENT_SECRET
+    if not AGENT_SECRET:
+        raise HTTPException(400, "未配置 NARCI_AGENT_SECRET, 无法直连")
+    import hashlib
+    import hmac
+    exp = int(time.time()) + 60
+    token = hmac.new(AGENT_SECRET.encode(), f"{serial}:{exp}".encode(), hashlib.sha256).hexdigest()[:24]
+    return {"token": f"{token}:{exp}", "agent_url": agent["url"]}
 
 
 @app.get("/metrics")
