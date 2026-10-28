@@ -175,6 +175,41 @@
         <div id="batch-action-result" class="result-box"></div>
       </div>
       <div class="pane-card">
+        <h3>设备托管（Device Owner）</h3>
+        <div class="hint">让设备进入受管状态：可锁定为单应用 Kiosk、禁止恢复出厂、远程锁屏/擦除、限制相机与截屏。
+          需先在设备上安装 DPC 应用，再用本面板设为 Device Owner。</div>
+        <div class="form-row">
+          <button id="do-status" class="btn small primary">读取托管状态</button>
+          <span class="spacer"></span>
+          <span id="do-state" class="hint">未读取</span>
+        </div>
+        <div id="do-detail" class="hint">点「读取托管状态」查看</div>
+        <h4>设为 Device Owner</h4>
+        <div class="form-row">
+          <input id="do-component" placeholder="com.example.dpc/.MyDeviceAdminReceiver" style="width:360px">
+          <button id="do-provision" class="btn small">设置</button>
+          <button id="do-deprovision" class="btn small">移除</button>
+        </div>
+        <h4>策略命令</h4>
+        <div class="form-row">
+          <select id="do-command">
+            <option value="lock_now">远程锁屏</option>
+            <option value="wipe">远程擦除</option>
+            <option value="set_kiosk">锁定 Kiosk</option>
+            <option value="clear_kiosk">解除 Kiosk</option>
+            <option value="suspend_app">停用应用</option>
+            <option value="unsuspend_app">启用应用</option>
+            <option value="set_factory_reset_allowed">允许/禁止恢复出厂</option>
+            <option value="set_camera_disabled">禁用/启用相机</option>
+            <option value="set_screen_capture_disabled">禁用/启用截屏</option>
+          </select>
+          <input id="do-param-key" placeholder="参数名(如 package)" style="width:150px">
+          <input id="do-param-value" placeholder="参数值" style="width:180px">
+          <button id="do-run" class="btn small danger">执行</button>
+        </div>
+        <div id="do-result" class="result-box"></div>
+      </div>
+      <div class="pane-card">
         <h3>弱网模拟</h3>
         <div class="hint">把选中设备的全局 HTTP 代理指向本机节流代理，模拟窄带/高延迟/丢包。只影响经过代理的流量，随时可关闭。</div>
         <div class="form-row">
@@ -674,12 +709,12 @@
 </div>
 <!-- posthog-js 以 ES module 引入（无构建步骤）：importmap 把裸导入名指到本地 SDK 副本 -->
 <script type="importmap">
-{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=050"}}
+{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=051"}}
 </script>
-<script src="/static/js/api.js?v=050"></script>
-<script type="module" src="/static/js/analytics.js?v=050"></script>
-<script src="/static/js/mirror.js?v=050"></script>
-<script src="/static/js/scenario.js?v=050"></script>
-<script src="/static/js/app.js?v=050"></script>
+<script src="/static/js/api.js?v=051"></script>
+<script type="module" src="/static/js/analytics.js?v=051"></script>
+<script src="/static/js/mirror.js?v=051"></script>
+<script src="/static/js/scenario.js?v=051"></script>
+<script src="/static/js/app.js?v=051"></script>
 </body>
 </html>

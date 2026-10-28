@@ -60,6 +60,10 @@ with Client("http://127.0.0.1:8555") as c:
 | `plugins()` | 已注册的步骤插件 |
 | `batch_actions()` / `batch_action(action, targets, package)` | 批量快捷操作（重启/飞行模式/找机/清数据） |
 | `netlimit_status()` / `netlimit_start(...)` / `netlimit_stop(targets)` | 弱网模拟（带宽/延迟/丢包） |
+| `policy_status(serial)` | 设备托管状态（Device Owner / Kiosk / 相机限制） |
+| `policy_commands()` | 支持的设备托管策略命令 |
+| `set_device_owner(serial, component)` / `remove_device_owner(...)` | 设置 / 移除 Device Owner |
+| `policy_command(serial, command, params)` | 下发策略命令（锁屏/擦除/Kiosk/相机限制） |
 
 ## CI 集成示例
 

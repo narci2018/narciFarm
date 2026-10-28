@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.narcifarm.dpc">
+
+    <application
+        android:allowBackup="false"
+        android:label="narciFarm DPC"
+        android:supportsRtl="true">
+
+        <!-- 设备管理员接收器：dpm set-device-owner 需要它 -->
+        <receiver
+            android:name=".NarciDeviceAdminReceiver"
+            android:description="@string/device_admin_description"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 策略命令接收器：监听 narciFarm 下发的广播 -->
+        <receiver
+            android:name=".PolicyReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.narcifarm.POLICY" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

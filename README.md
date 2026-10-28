@@ -51,6 +51,7 @@ FastAPI 后端 (narci/)
 | Python SDK（设备/场景/报告，标准库实现，CI 友好） | — |
 | 设备快捷操作（重启/飞行模式/找机/清数据，批量） | Intune / SOTI / Esper |
 | 弱网模拟（带宽/延迟/丢包，代理层实现，真机免 root） | BrowserStack / Sauce Labs / LambdaTest |
+| 设备托管（Device Owner：Kiosk / 禁止恢复出厂 / 远程锁屏擦除 / 相机截屏限制） | Intune / SOTI / Esper / Scalefusion |
 
 ## 快速开始
 

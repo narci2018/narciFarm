@@ -23,4 +23,4 @@
 from .client import Client, NarciError
 
 __all__ = ["Client", "NarciError"]
-__version__ = "0.9.9"
+__version__ = "0.9.10"

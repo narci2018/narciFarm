@@ -220,6 +220,31 @@ class Client:
         """关闭弱网模拟并清除设备代理。"""
         return self._request("POST", "/api/netlimit/stop", {"targets": targets})
 
+    # ---------- 设备托管 ----------
+
+    def policy_status(self, serial: str) -> dict:
+        """设备托管状态（Device Owner、Kiosk 锁定、相机/截屏限制等）。"""
+        return self._request("GET", f"/api/devices/{serial}/policy")
+
+    def policy_commands(self) -> dict:
+        """支持的设备托管策略命令。"""
+        return self._request("GET", "/api/policy/commands")
+
+    def set_device_owner(self, serial: str, component: str) -> dict:
+        """把指定 DPC 设为 Device Owner。"""
+        return self._request("POST", f"/api/devices/{serial}/policy/provision",
+                             {"component": component})
+
+    def remove_device_owner(self, serial: str, component: str) -> dict:
+        """移除 Device Owner。"""
+        return self._request("POST", f"/api/devices/{serial}/policy/deprovision",
+                             {"component": component})
+
+    def policy_command(self, serial: str, command: str, params: Optional[dict] = None) -> dict:
+        """下发设备托管策略命令（需设备已设置 Device Owner）。"""
+        return self._request("POST", f"/api/devices/{serial}/policy/command",
+                             {"command": command, "params": params or {}})
+
     # ---------- 其他 ----------
 
     def plugins(self) -> dict:

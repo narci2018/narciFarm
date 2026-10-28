@@ -454,6 +454,83 @@ async function runNetLimit(start) {
   }
 }
 
+async function loadPolicyStatus() {
+  const serial = window.appSelectedDevices()[0] || $('dt-device')?.value;
+  if (!serial) return toast('请先选择设备', 'error');
+  const box = $('do-detail');
+  box.textContent = '读取中…';
+  try {
+    const st = await API.get(`/api/devices/${encodeURIComponent(serial)}/policy`);
+    $('do-state').textContent = st.has_owner
+      ? `已托管：${st.owner_package}` : '未托管';
+    $('do-state').className = st.has_owner ? 'hint ok' : 'hint warn';
+    const rows = [
+      ['Device Owner', st.owner_package || '无'],
+      ['管理员应用', (st.admin_packages || []).join(', ') || '无'],
+      ['Kiosk 锁定', (st.lock_task_packages || []).join(', ') || '无'],
+      ['相机', st.camera_disabled === null ? '未知' : st.camera_disabled ? '禁用' : '允许'],
+      ['恢复出厂', st.factory_reset_allowed === null ? '未知' : st.factory_reset_allowed ? '允许' : '禁止'],
+      ['截屏', st.screen_capture_disabled === null ? '未知' : st.screen_capture_disabled ? '禁止' : '允许'],
+      ['dumpsys 解析', st.parsed ? '成功' : '失败（可能不支持或设备离线）'],
+    ];
+    box.innerHTML = '<table class="data-table"><tbody>' +
+      rows.map(r => `<tr><td>${esc(r[0])}</td><td>${esc(String(r[1]))}</td></tr>`).join('') +
+      '</tbody></table>';
+  } catch (e) {
+    box.textContent = e.message;
+    toast(e.message, 'error');
+  }
+}
+
+async function provisionDeviceOwner(set) {
+  const serial = window.appSelectedDevices()[0] || $('dt-device')?.value;
+  if (!serial) return toast('请先选择设备', 'error');
+  const component = $('do-component').value.trim();
+  if (!component) return toast('请填写 DPC 组件名', 'error');
+  if (!component.includes('/')) return toast('格式应为 包名/DeviceAdminReceiver', 'error');
+  const box = $('do-result');
+  box.textContent = (set ? '设置' : '移除') + '中…';
+  try {
+    await API.post(`/api/devices/${encodeURIComponent(serial)}/policy/${set ? 'provision' : 'deprovision'}`,
+                   { component });
+    box.textContent = (set ? '已设置 ' : '已移除 ') + component;
+    toast('完成', 'ok');
+    loadPolicyStatus();
+  } catch (e) {
+    box.textContent = e.message;
+    toast(e.message, 'error');
+  }
+}
+
+async function runPolicyCommand() {
+  const serial = window.appSelectedDevices()[0] || $('dt-device')?.value;
+  if (!serial) return toast('请先选择设备', 'error');
+  const command = $('do-command').value;
+  const k = $('do-param-key').value.trim();
+  const v = $('do-param-value').value.trim();
+  const danger = command === 'wipe';
+  if (danger && !await showConfirm({
+    title: '确认操作', message: `将对 ${serial} 执行「远程擦除」，数据将不可恢复。`,
+    okText: '执行', danger: true,
+  })) return;
+  const box = $('do-result');
+  box.textContent = '执行中…';
+  try {
+    const params = {};
+    if (k) {
+      params[k] = v === 'true' ? true : v === 'false' ? false : v;
+    }
+    const r = await API.post(`/api/devices/${encodeURIComponent(serial)}/policy/command`,
+                             { command, params });
+    box.textContent = `已下发 ${r.command} -> ${r.owner}`;
+    toast('命令已下发', 'ok');
+    loadPolicyStatus();
+  } catch (e) {
+    box.textContent = e.message;
+    toast(e.message, 'error');
+  }
+}
+
 function bindBatch() {
   $('batch-install').onclick = async () => {
     const f = $('batch-apk').files[0];
@@ -503,6 +580,10 @@ function bindBatch() {
       } catch (e) { box.textContent += `\n[${s}] 失败: ${e.message}`; }
     }));
   };
+  $('do-status').onclick = loadPolicyStatus;
+  $('do-provision').onclick = () => provisionDeviceOwner(true);
+  $('do-deprovision').onclick = () => provisionDeviceOwner(false);
+  $('do-run').onclick = runPolicyCommand;
   $('nl-start').onclick = () => runNetLimit(true);
   $('nl-stop').onclick = () => runNetLimit(false);
   document.querySelectorAll('#batch-actions [data-act], [data-act="kill_app"], [data-act="clear_data"]').forEach(btn => {

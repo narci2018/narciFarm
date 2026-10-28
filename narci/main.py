@@ -13,7 +13,8 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import adb, auth as _auth, db, plugins, reports, scenario, scheduler, vision
+from . import (adb, auth as _auth, db, devicepolicy, netlimit as _netlimit_mod, plugins,
+               reports, scenario, scheduler, vision)
 from .config import (CAPTURES_DIR, DEVICE_REFRESH_INTERVAL, HOST, MAX_FPS,
                      MAX_SIZE, PORT, SNAPSHOT_INTERVAL, STATIC_DIR,
                      UPLOADS_DIR, VIDEO_BITRATE)
@@ -158,7 +159,7 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-__version__ = "0.9.9"
+__version__ = "0.9.10"
 app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 
@@ -723,6 +724,58 @@ async def api_batch_actions(_=Depends(_auth.require_user)):
     """可用的批量操作清单（供前端渲染按钮）。"""
     return [{"action": a, "needs_param": n, "param": p}
             for a, (n, p, _) in _BATCH_ACTIONS.items()]
+
+
+# ---------- 设备托管（Device Owner / MDM 层） ----------
+
+@app.get("/api/devices/{serial}/policy")
+async def api_device_policy(serial: str, _=Depends(_auth.require_user)):
+    """设备托管状态（是否有 Device Owner、锁定的应用、相机/恢复出厂/截屏限制）。"""
+    return await devicepolicy.policy_status(serial)
+
+
+@app.get("/api/policy/commands")
+async def api_policy_commands(_=Depends(_auth.require_user)):
+    """支持的设备托管策略命令。"""
+    return {"commands": list(devicepolicy.POLICY_COMMANDS),
+            "action": devicepolicy.POLICY_ACTION}
+
+
+@app.post("/api/devices/{serial}/policy/provision")
+async def api_policy_provision(serial: str, body: dict, _=Depends(_auth.require_admin)):
+    """把指定 DPC 设为 Device Owner（设备需未配置账号且未设置过 DO）。"""
+    component = str(body.get("component", "")).strip()
+    if not component:
+        raise HTTPException(400, "缺少 component")
+    try:
+        return await devicepolicy.set_device_owner(serial, component)
+    except adb.AdbError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/devices/{serial}/policy/deprovision")
+async def api_policy_deprovision(serial: str, body: dict, _=Depends(_auth.require_admin)):
+    """移除 Device Owner。"""
+    component = str(body.get("component", "")).strip()
+    if not component:
+        raise HTTPException(400, "缺少 component")
+    try:
+        return await devicepolicy.remove_device_owner(serial, component)
+    except adb.AdbError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/devices/{serial}/policy/command")
+async def api_policy_command(serial: str, body: dict, _=Depends(_auth.require_admin)):
+    """下发设备托管策略命令（需设备已设置 Device Owner）。"""
+    command = str(body.get("command", "")).strip()
+    if not command:
+        raise HTTPException(400, "缺少 command")
+    try:
+        return await devicepolicy.send_policy_command(
+            serial, command, body.get("params") or {})
+    except adb.AdbError as e:
+        raise HTTPException(400, str(e))
 
 
 # ---------- 弱网模拟 ----------
