@@ -714,6 +714,71 @@ function bindCaptures() {
   $('cp-reload').onclick = loadCaptures;
 }
 
+// 把坐标点击步骤解析为控件定位步骤（依赖设备当前界面状态，故在录制时调用）
+async function resolveStepToElement(serial, step, onChanged) {
+  try {
+    const r = await API.post(`/api/devices/${encodeURIComponent(serial)}/resolve-at`,
+      { x_pct: step.x_pct, y_pct: step.y_pct });
+    if (!r.found || !r.selector) return false;
+    delete step.x_pct; delete step.y_pct;
+    delete step.x; delete step.y;
+    step.type = 'tap_el';
+    Object.assign(step, r.selector);
+    if (onChanged) onChanged();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 框选屏幕区域存为图像模板（用于 tap_image / assert_image）
+function captureRegionAsTemplate(rect) {
+  const m = State.mirror;
+  if (!m || !m.canvas) { toast('请先打开投屏', 'error'); return; }
+  const src = m.canvas;
+  const scaleX = (m.width || src.videoWidth || src.width) / (src.clientWidth || src.width || 1);
+  const scaleY = (m.height || src.videoHeight || src.height) / (src.clientHeight || src.height || 1);
+  const sx = Math.max(0, Math.round(rect.x * scaleX));
+  const sy = Math.max(0, Math.round(rect.y * scaleY));
+  const sw = Math.max(2, Math.round(rect.w * scaleX));
+  const sh = Math.max(2, Math.round(rect.h * scaleY));
+  const off = document.createElement('canvas');
+  off.width = sw; off.height = sh;
+  off.getContext('2d').drawImage(src, sx, sy, sw, sh, 0, 0, sw, sh);
+  off.toBlob(async (blob) => {
+    if (!blob) { toast('截取失败', 'error'); return; }
+    const name = `region_${Date.now()}.png`;
+    const fd = new FormData();
+    fd.append('file', blob, name);
+    try {
+      await API.post('/api/templates/upload', fd);
+      toast(`模板已保存: ${name} (${sw}x${sh})`, 'ok');
+      if (typeof loadTemplates === 'function') loadTemplates();
+    } catch (e) { toast(e.message, 'error'); }
+  }, 'image/png');
+}
+
+// 录制时插入断言 / 截图步骤
+function insertAssertStep() {
+  if (!window.ScenarioEditor) { toast('请先打开场景编排页', 'error'); return; }
+  showPrompt({
+    title: '插入断言', message: '要断言的界面文本',
+    defaultValue: '', okText: '插入',
+  }).then((text) => {
+    if (!text) return;
+    ScenarioEditor.steps.push({ type: 'assert_text', text, expect: 'exists' });
+    ScenarioEditor._syncRaw(); ScenarioEditor.render();
+    toast('已插入断言步骤', 'ok');
+  }).catch(() => {});
+}
+
+function insertScreenshotStep() {
+  if (!window.ScenarioEditor) { toast('请先打开场景编排页', 'error'); return; }
+  ScenarioEditor.steps.push({ type: 'screenshot', name: `rec_${Date.now()}` });
+  ScenarioEditor._syncRaw(); ScenarioEditor.render();
+  toast('已插入截图步骤', 'ok');
+}
+
 // ---------- 投屏模态窗口 ----------
 
 function openMirror(serial, opts = {}) {
@@ -754,6 +819,13 @@ function openMirror(serial, opts = {}) {
       ScenarioEditor.steps.push(step);
       ScenarioEditor._syncRaw();
       ScenarioEditor.render();
+      // 控件级录制：把坐标点击升级为控件定位（跨分辨率可回放）
+      if (step.type === 'tap' && step.x_pct != null) {
+        resolveStepToElement(serial, step, () => {
+          ScenarioEditor._syncRaw();
+          ScenarioEditor.render();
+        });
+      }
     },
     onFallback: (reason) => {
       hideLoading();
@@ -765,6 +837,9 @@ function openMirror(serial, opts = {}) {
       hideLoading();
       const mb = $('mm-mode');
       if (mb) { mb.textContent = '实时'; mb.className = 'hint ok'; }
+    },
+    onCrop: (rect) => {
+      captureRegionAsTemplate(rect);
     },
     onInjectFeedback: (action, targets, results) => {
       const st = $('mm-inject-status');
@@ -921,6 +996,14 @@ function openMirror(serial, opts = {}) {
       toast(`截图已保存: ${r.file}`, 'ok');
     } catch (e) { toast(e.message, 'error'); }
   };
+  $('mm-crop-tpl').onclick = () => {
+    if (!State.mirror) return;
+    State.mirror.cropMode = !State.mirror.cropMode;
+    $('mm-crop-tpl').classList.toggle('primary', State.mirror.cropMode);
+    toast(State.mirror.cropMode ? '框选模式：在画面上拖出区域作为图像模板' : '已退出框选模式', 'info');
+  };
+  $('mm-add-assert').onclick = insertAssertStep;
+  $('mm-add-shot').onclick = insertScreenshotStep;
   $('mm-record-video').onclick = () => {
     if (videoRecorder) { videoRecorder.stop(); return; }
     if (!canvas.captureStream) return toast('浏览器不支持录像', 'error');
@@ -1726,6 +1809,14 @@ async function showReportDetail(reportId) {
             `<td>${step.elapsed ?? ''}</td><td>${esc(String(detail))}</td></tr>`;
         }
         html += '</tbody></table>';
+      }
+      const m = d.metrics || {};
+      if (m.samples) {
+        html += '<table class="data-table"><thead><tr><th>CPU 峰值%</th><th>内存峰值%</th>' +
+          '<th>电量</th><th>电池温度峰值℃</th><th>采样数</th></tr></thead><tbody><tr>' +
+          `<td>${m.cpu_max ?? '—'}</td><td>${m.mem_max ?? '—'}</td>` +
+          `<td>${m.battery_start ?? '—'} → ${m.battery_end ?? '—'}</td>` +
+          `<td>${m.temp_max ?? '—'}</td><td>${m.samples}</td></tr></tbody></table>`;
       }
       html += '</div>';
     }

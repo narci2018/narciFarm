@@ -476,6 +476,51 @@ async def find_element(serial: str, kind: str, value: str, contains: bool = Fals
     return els[index]
 
 
+def _bounds_rect(bounds: str) -> Optional[tuple[int, int, int, int]]:
+    """把 "[x1,y1][x2,y2]" 解析为矩形元组。"""
+    m = _BOUNDS_RE.search(bounds or "")
+    if not m:
+        return None
+    return tuple(int(v) for v in m.groups())
+
+
+def selector_from_element(el: dict) -> Optional[dict]:
+    """把控件节点转成选择器：优先 resource-id，其次 content-desc，再 text，最后 class。
+
+    用于把坐标点击升级为控件定位（录制场景时保证跨分辨率可回放）。
+    """
+    rid = (el.get("id") or "").strip()
+    if rid:
+        return {"kind": "id", "value": rid, "contains": False, "index": 0}
+    desc = (el.get("desc") or "").strip()
+    if desc:
+        return {"kind": "desc", "value": desc, "contains": False, "index": 0}
+    text = (el.get("text") or "").strip()
+    if text:
+        return {"kind": "text", "value": text, "contains": False, "index": 0}
+    cls = (el.get("class") or "").strip()
+    if cls:
+        return {"kind": "class", "value": cls, "contains": False, "index": 0}
+    return None
+
+
+async def find_element_at(serial: str, x: int, y: int, timeout: float = 25) -> Optional[dict]:
+    """返回包含给定像素坐标的最小控件节点（命中测试）。无命中返回 None。"""
+    nodes = await dump_hierarchy(serial, timeout=timeout)
+    cands: list[tuple[int, dict]] = []
+    for n in nodes:
+        rect = _bounds_rect(n.get("bounds", ""))
+        if not rect:
+            continue
+        x1, y1, x2, y2 = rect
+        if x1 <= x <= x2 and y1 <= y <= y2:
+            cands.append(((x2 - x1) * (y2 - y1), n))
+    if not cands:
+        return None
+    cands.sort(key=lambda t: t[0])
+    return cands[0][1]
+
+
 async def tap_element(serial: str, kind: str, value: str, contains: bool = False,
                      index: int = 0, timeout: float = 25) -> dict:
     """按选择器点击控件中心。"""
@@ -497,6 +542,45 @@ def parse_selector(spec: dict) -> tuple[str, str, bool, int]:
     contains = bool(spec.get("contains", spec.get("fuzzy", False)))
     index = int(spec.get("index", 0) or 0)
     return kind, value, contains, index
+
+
+async def read_metrics(serial: str) -> dict:
+    """采集设备性能指标：电量/温度/内存/CPU。单个字段失败时省略而非报错。
+
+    用于场景运行期间的采样与报告，不涉及账号或平台数据。
+    """
+    out: dict = {}
+    # 电池电量与温度
+    with contextlib.suppress(Exception):
+        rc, txt = await shell(serial, "dumpsys battery", timeout=10)
+        m = re.search(r"level:\s*(\d+)", txt)
+        if m:
+            out["battery_pct"] = int(m.group(1))
+        m = re.search(r"temperature:\s*(\d+)", txt)
+        if m:
+            out["battery_temp_c"] = round(int(m.group(1)) / 10.0, 1)
+    # 内存
+    with contextlib.suppress(Exception):
+        rc, txt = await shell(serial, "cat /proc/meminfo", timeout=10)
+        total = avail = None
+        m = re.search(r"MemTotal:\s*(\d+)", txt)
+        if m:
+            total = int(m.group(1))
+        m = re.search(r"MemAvailable:\s*(\d+)", txt)
+        if m:
+            avail = int(m.group(1))
+        if total:
+            out["mem_total_mb"] = round(total / 1024, 1)
+            if avail is not None:
+                out["mem_avail_mb"] = round(avail / 1024, 1)
+                out["mem_used_pct"] = round((total - avail) / total * 100, 1)
+    # CPU 使用率（top 汇总行）
+    with contextlib.suppress(Exception):
+        rc, txt = await shell(serial, "top -n 1 -b 2>/dev/null | head -20", timeout=15)
+        m = re.search(r"(\d+)%idle", txt)
+        if m:
+            out["cpu_used_pct"] = round(100.0 - float(m.group(1)), 1)
+    return out
 
 
 async def list_apps(serial: str) -> list[str]:

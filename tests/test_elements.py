@@ -103,3 +103,37 @@ def test_find_element_out_of_range_returns_none(monkeypatch):
     root = ET.fromstring(SAMPLE_XML)
     monkeypatch.setattr(adb, "_dump_xml", _fake_dump(root))
     assert asyncio.run(adb.find_element("S", "text", "设置", index=5)) is None
+
+
+# ---------- 命中测试与选择器生成（控件级录制） ----------
+
+def test_find_element_at_picks_smallest_containing_node(monkeypatch):
+    xml = (
+        '<hierarchy>'
+        '<node text="" resource-id="com.x:id/root" class="android.widget.FrameLayout" '
+        'content-desc="" package="com.x" bounds="[0,0][1000,2000]"/>'
+        '<node text="" resource-id="com.x:id/btn" class="android.widget.Button" '
+        'content-desc="" package="com.x" bounds="[100,100][300,200]"/>'
+        '<node text="" resource-id="com.x:id/inner" class="android.view.View" '
+        'content-desc="" package="com.x" bounds="[150,120][200,150]"/>'
+        '</hierarchy>'
+    )
+    root = ET.fromstring(xml)
+    monkeypatch.setattr(adb, "_dump_xml", _fake_dump(root))
+    el = asyncio.run(adb.find_element_at("S", 170, 130))
+    assert el["id"] == "com.x:id/inner"
+    assert asyncio.run(adb.find_element_at("S", 500, 500))["id"] == "com.x:id/root"
+    assert asyncio.run(adb.find_element_at("S", 5000, 5000)) is None
+
+
+def test_selector_from_element_priority_order():
+    assert adb.selector_from_element({"id": "com.x:id/a", "desc": "d", "text": "t", "class": "c"}) == {
+        "kind": "id", "value": "com.x:id/a", "contains": False, "index": 0}
+    assert adb.selector_from_element({"id": "", "desc": "d", "text": "t", "class": "c"})["kind"] == "desc"
+    assert adb.selector_from_element({"id": "", "desc": "", "text": "t", "class": "c"})["kind"] == "text"
+    assert adb.selector_from_element({"id": "", "desc": "", "text": "", "class": "c"})["kind"] == "class"
+    assert adb.selector_from_element({"id": "", "desc": "", "text": "", "class": ""}) is None
+
+
+def test_selector_from_element_ignores_blank_values():
+    assert adb.selector_from_element({"id": "   ", "desc": "确定", "text": "", "class": ""})["kind"] == "desc"

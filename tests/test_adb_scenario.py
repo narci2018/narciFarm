@@ -61,10 +61,10 @@ def test_validate_steps():
 def test_execute_assert_text(monkeypatch):
     import asyncio
 
-    async def fake_find_text(serial, text, timeout=25):
-        return (100, 200) if text == "存在" else None
+    async def fake_dump(serial, timeout=25):
+        return [{"text": "存在", "content_desc": "", "center": (100, 200)}]
 
-    monkeypatch.setattr(sc.adb, "find_text", fake_find_text)
+    monkeypatch.setattr(sc.adb, "dump_hierarchy", fake_dump)
     assert asyncio.run(sc._execute_step(
         {"type": "assert_text", "text": "存在", "expect": "exists"}, "S", (0, 0), "t"))["met"]
     assert asyncio.run(sc._execute_step(

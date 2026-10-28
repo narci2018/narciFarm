@@ -155,7 +155,7 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-__version__ = "0.9.6"
+__version__ = "0.9.7"
 app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 
@@ -560,7 +560,10 @@ async def api_run_scenario(scenario_id: int, body: dict):
         if not r.get("ok"):
             raise HTTPException(502, r.get("error", "Agent 场景执行失败"))
         return {"run_id": r.get("run_id"), "targets": targets, "remote": True}
-    run_id = await scenario.start_run(steps, repeat, local, body.get("vars"), scenario_name=sc["name"])
+    run_id = await scenario.start_run(
+        steps, repeat, local, body.get("vars"), scenario_name=sc["name"],
+        collect_metrics=bool(body.get("collect_metrics")),
+        metrics_interval=float(body.get("metrics_interval", 2.0)))
     return {"run_id": run_id, "targets": targets}
 
 
@@ -616,6 +619,29 @@ async def api_delete_report(report_id: str, _=Depends(_auth.require_admin)):
     if not reports.delete_report(report_id):
         raise HTTPException(404, "报告不存在")
     return {"ok": True}
+
+
+@app.post("/api/devices/{serial}/resolve-at")
+async def api_resolve_at(serial: str, body: dict, _=Depends(_auth.require_user)):
+    """把归一化坐标解析为控件选择器（录制时把坐标点击升级为控件定位）。"""
+    x_pct = float(body.get("x_pct", 0) or 0)
+    y_pct = float(body.get("y_pct", 0) or 0)
+    size = await adb.get_screen_size(serial)
+    w, h = size or (0, 0)
+    x = int(round(x_pct * w))
+    y = int(round(y_pct * h))
+    el = await adb.find_element_at(serial, x, y)
+    if el is None:
+        return {"found": False, "x": x, "y": y, "size": [w, h]}
+    sel = adb.selector_from_element(el)
+    return {
+        "found": sel is not None,
+        "selector": sel,
+        "center": el.get("center"),
+        "x": x, "y": y, "size": [w, h],
+        "element": {"text": el.get("text", ""), "id": el.get("id", ""),
+                    "desc": el.get("desc", ""), "class": el.get("class", "")},
+    }
 
 
 # ---------- 控件树 / 元素定位 ----------
@@ -965,7 +991,12 @@ async def api_metrics(serial: str):
     if db.agent_of(serial):
         r = await _proxy_to_agent(serial, "metrics", {})
         return {k: v for k, v in r.items() if k != "ok"}
-    m = await adb.get_metrics(serial)
+    # read_metrics 覆盖电量/温度/内存/CPU；get_metrics 提供网络与帧率等补充字段
+    m = await adb.read_metrics(serial)
+    with suppress(Exception):
+        extra = await adb.get_metrics(serial)
+        for k, v in (extra or {}).items():
+            m.setdefault(k, v)
     client = hub.get(serial)
     if client:
         m["fps"] = round(client.fps(), 1)

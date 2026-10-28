@@ -13,7 +13,10 @@ const STEP_FIELDS = {
   screenshot: [['name', '文件名(可选)']],
   tap_text: [['text', '要点击的文本']],
   wait_text: [['text', '等待出现的文本'], ['timeout_ms', '超时ms'], ['interval_ms', '轮询间隔ms']],
-  assert_text: [['text', '文本'], ['expect', 'exists(须存在) / absent(须不存在)']],
+  assert_text: [['text', '文本'], ['expect', 'exists(须存在) / absent(须不存在)'],
+                 ['match', '匹配模式 exact/contains/regex/startswith/endswith']],
+  assert_value: [['actual', '实际值(支持 {{变量}})'], ['expected', '期望值'],
+                 ['op', '比较符 eq/ne/gt/gte/lt/lte/contains/regex']],
   rand_wait: [['min_ms', '最小ms'], ['max_ms', '最大ms']],
   start_activity: [['component', 'com.pkg/.MainActivity']],
   tap_image: [['image', '模板文件名(如 btn.png)'], ['threshold', '阈值0~1']],
@@ -29,13 +32,16 @@ const STEP_FIELDS = {
   wait_el: [['kind', '定位维度'], ['value', '匹配值'], ['contains', '模糊匹配 1/0'],
             ['index', '第几个(0起)'], ['timeout_ms', '超时ms'], ['interval_ms', '轮询ms']],
   assert_el: [['kind', '定位维度'], ['value', '匹配值'], ['contains', '模糊匹配 1/0'],
-              ['index', '第几个(0起)'], ['expect', 'exists / absent']],
+              ['index', '第几个(0起)'], ['expect', 'exists / absent'],
+              ['match', '匹配模式 exact/contains/regex/startswith/endswith']],
   swipe_el: [['kind', '定位维度'], ['value', '匹配值'], ['contains', '模糊匹配 1/0'],
              ['index', '第几个(0起)'], ['x2', '终点x'], ['y2', '终点y'], ['duration_ms', '时长ms']],
   loop: [['count', '次数']],
 };
 
 const SELECTOR_KINDS = ['text', 'id', 'desc', 'class', 'package', 'xpath'];
+const MATCH_MODES = ['exact', 'contains', 'regex', 'startswith', 'endswith'];
+const COMPARE_OPS = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'regex'];
 const SELECTOR_STEPS = ['tap_el', 'wait_el', 'assert_el', 'swipe_el'];
 
 const ScenarioEditor = {
@@ -118,10 +124,14 @@ const ScenarioEditor = {
     const form = allFields.map(([key, label]) => {
       const val = step[key] ?? '';
       const isBool = key === 'contains';
-      const input = (SELECTOR_KINDS.includes(val) && key === 'kind')
-        ? `<select data-k="kind">${SELECTOR_KINDS.map(k =>
-            `<option value="${k}"${k === val ? ' selected' : ''}>${k}</option>`).join('')}</select>`
-        : `<input data-k="${esc(key)}" value="${esc(isBool ? (val ? 1 : 0) : val)}">`;
+      const select = (name, options) =>
+        `<select data-k="${name}">${options.map(k =>
+          `<option value="${k}"${k === val ? ' selected' : ''}>${k}</option>`).join('')}</select>`;
+      let input;
+      if (key === 'kind' && SELECTOR_KINDS.includes(val)) input = select('kind', SELECTOR_KINDS);
+      else if (key === 'match') input = select('match', MATCH_MODES);
+      else if (key === 'op') input = select('op', COMPARE_OPS);
+      else input = `<input data-k="${esc(key)}" value="${esc(isBool ? (val ? 1 : 0) : val)}">`;
       return `<label style="min-width:auto">${esc(label)}</label>${input}`;
     }).join('');
     const tr = document.createElement('tr');
@@ -163,6 +173,7 @@ const ScenarioEditor = {
       if (type === 'assert_el') step.expect = 'exists';
       if (type === 'swipe_el') step.duration_ms = 300;
     }
+    if (type === 'assert_value') { step.actual = ''; step.expected = ''; step.op = 'eq'; }
     if (type === 'ocr_tap') step.text = '';
     if (type === 'ocr_find') step.text = '';
     if (type === 'find_image') { step.image = ''; step.threshold = 0.8; step.max_results = 1; }
@@ -200,7 +211,13 @@ const ScenarioEditor = {
     if (window.appSelectedDevices().length === 0) { toast('请先在左侧勾选目标设备', 'error'); return; }
     if (!this.scenarioId) { toast('请先保存场景', 'error'); return; }
     try {
-      const r = await API.post(`/api/scenarios/${this.scenarioId}/run`, { targets: window.appSelectedDevices() });
+      const collect = document.getElementById('sc-collect-metrics');
+      const interval = document.getElementById('sc-metrics-interval');
+      const r = await API.post(`/api/scenarios/${this.scenarioId}/run`, {
+        targets: window.appSelectedDevices(),
+        collect_metrics: !!(collect && collect.checked),
+        metrics_interval: interval ? parseFloat(interval.value) || 2 : 2,
+      });
       if (window.Analytics) {
         window.Analytics.capture('scenario_run_started', { targets: r.targets.length });
       }

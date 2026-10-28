@@ -18,7 +18,7 @@ STEP_TYPES = {"tap", "swipe", "text", "key", "back", "home", "launch", "stop_app
               "wait_text", "assert_text", "rand_wait", "start_activity",
               "tap_image", "wait_image", "assert_image", "find_image",
               "ocr_tap", "ocr_get", "ocr_find",
-              "tap_el", "wait_el", "assert_el", "swipe_el"}
+              "tap_el", "wait_el", "assert_el", "swipe_el", "assert_value"}
 
 _runs: dict[str, dict] = {}
 _lock = asyncio.Lock()
@@ -26,6 +26,82 @@ _lock = asyncio.Lock()
 
 class ScenarioError(Exception):
     pass
+
+
+class SoftAssertionError(ScenarioError):
+    """软断言失败：记录到运行结果但不中止该设备的后续步骤。"""
+    soft = True
+
+
+def _as_bool(v) -> bool:
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _text_matches(actual: str, expected: str, mode: str) -> bool:
+    """文本匹配：exact 精确 / contains 包含 / regex 正则 / startswith / endswith。"""
+    mode = (mode or "exact").strip().lower()
+    if mode == "exact":
+        return actual == expected
+    if mode == "contains":
+        return expected in actual
+    if mode == "startswith":
+        return actual.startswith(expected)
+    if mode == "endswith":
+        return actual.endswith(expected)
+    if mode == "regex":
+        import re
+        try:
+            return re.search(expected, actual) is not None
+        except re.error:
+            raise ScenarioError(f"正则表达式无效: {expected}")
+    raise ScenarioError(f"未知匹配模式: {mode}")
+
+
+def _compare(actual, expected, op: str) -> tuple[bool, str]:
+    """数值/字符串比较，返回 (是否成立, 说明)。"""
+    op = (op or "eq").strip().lower()
+    numeric = False
+    try:
+        a, b = float(actual), float(expected)
+        numeric = True
+    except (TypeError, ValueError):
+        a, b = str(actual), str(expected)
+    if op in ("eq", "==", "="):
+        return a == b, f"{a} == {b}"
+    if op in ("ne", "!=", "<>"):
+        return a != b, f"{a} != {b}"
+    if op in ("gt", ">"):
+        if not numeric:
+            return False, "非数值无法比较大小"
+        return a > b, f"{a} > {b}"
+    if op in ("gte", ">="):
+        if not numeric:
+            return False, "非数值无法比较大小"
+        return a >= b, f"{a} >= {b}"
+    if op in ("lt", "<"):
+        if not numeric:
+            return False, "非数值无法比较大小"
+        return a < b, f"{a} < {b}"
+    if op in ("lte", "<="):
+        if not numeric:
+            return False, "非数值无法比较大小"
+        return a <= b, f"{a} <= {b}"
+    if op == "contains":
+        return str(expected) in str(actual), f"{expected} in {actual}"
+    if op == "regex":
+        import re
+        try:
+            return re.search(str(expected), str(actual)) is not None, f"{expected} ~ {actual}"
+        except re.error:
+            raise ScenarioError(f"正则表达式无效: {expected}")
+    raise ScenarioError(f"未知比较操作符: {op}")
+
+
+def _raise_assert(step: dict, message: str) -> None:
+    """按 soft 标记决定抛软断言还是硬断言。"""
+    if _as_bool(step.get("soft", False)):
+        raise SoftAssertionError(message)
+    raise ScenarioError(message)
 
 
 def validate_steps(steps: list) -> None:
@@ -126,12 +202,29 @@ async def _execute_step(step: dict, serial: str, size: tuple[int, int],
     if stype == "assert_text":
         text = str(step["text"])
         expect = str(step.get("expect", "exists"))
-        center = await adb.find_text(serial, text)
+        # 默认 contains 以兼容旧场景（旧实现先精确后子串，等价于包含匹配）
+        mode = str(step.get("match", "contains"))
+        # 取当前界面全部节点，按 text / content-desc 做匹配
+        nodes = await adb.dump_hierarchy(serial)
+        hit = None
+        for n in nodes:
+            if _text_matches(n.get("text", ""), text, mode) or                _text_matches(n.get("content_desc", ""), text, mode):
+                hit = n
+                break
+        center = hit["center"] if hit else None
         if expect == "exists" and center is None:
-            raise ScenarioError(f"断言失败: 未找到文本 {text}")
+            _raise_assert(step, f"断言失败: 未找到文本 {text} (模式 {mode})")
         if expect == "absent" and center is not None:
-            raise ScenarioError(f"断言失败: 文本仍存在 {text}")
-        return {"expect": expect, "met": True}
+            _raise_assert(step, f"断言失败: 文本仍存在 {text}")
+        return {"expect": expect, "match": mode, "met": True, "center": center}
+    if stype == "assert_value":
+        actual = step.get("actual", step.get("value", ""))
+        expected = step.get("expected", "")
+        op = str(step.get("op", "eq"))
+        ok, detail = _compare(actual, expected, op)
+        if not ok:
+            _raise_assert(step, f"断言失败: {actual} {op} {expected} 不成立 ({detail})")
+        return {"actual": actual, "expected": expected, "op": op, "met": True}
     if stype == "rand_wait":
         lo = float(step.get("min_ms", 500))
         hi = max(float(step.get("max_ms", 2000)), lo)
@@ -172,9 +265,9 @@ async def _execute_step(step: dict, serial: str, size: tuple[int, int],
         expect = str(step.get("expect", "exists"))
         res = await vision.match_on_device(serial, path, threshold)
         if expect == "exists" and res is None:
-            raise ScenarioError(f"断言失败: 未匹配到图像 {path}")
+            _raise_assert(step, f"断言失败: 未匹配到图像 {path}")
         if expect == "absent" and res is not None:
-            raise ScenarioError(f"断言失败: 图像仍存在 {path}")
+            _raise_assert(step, f"断言失败: 图像仍存在 {path}")
         return {"expect": expect, "met": True}
     if stype in ("ocr_tap", "ocr_get", "ocr_find"):
         from . import vision
@@ -233,12 +326,17 @@ async def _execute_element_step(step: dict, serial: str) -> dict:
 
     if stype == "assert_el":
         expect = str(step.get("expect", "exists"))
-        el = await adb.find_element(serial, kind, value, contains=contains, index=index)
+        mode = str(step.get("match", "contains" if contains else "exact"))
+        if mode in ("regex", "startswith", "endswith"):
+            els = await adb.find_elements(serial, kind, "", contains=True)
+            el = next((e for e in els if _text_matches(e.get("text", ""), value, mode)), None)
+        else:
+            el = await adb.find_element(serial, kind, value, contains=(mode == "contains"), index=index)
         if expect == "exists" and el is None:
-            raise ScenarioError(f"断言失败: 未找到控件 {kind}={value}")
+            _raise_assert(step, f"断言失败: 未找到控件 {kind}={value} (模式 {mode})")
         if expect == "absent" and el is not None:
-            raise ScenarioError(f"断言失败: 控件仍存在 {kind}={value}")
-        return {"expect": expect, "met": True, "element": el}
+            _raise_assert(step, f"断言失败: 控件仍存在 {kind}={value}")
+        return {"expect": expect, "match": mode, "met": True, "element": el}
 
     if stype == "swipe_el":
         el = await adb.find_element(serial, kind, value, contains=contains, index=index)
@@ -323,6 +421,10 @@ async def _run_step_list(steps: list, serial: str, size: tuple[int, int],
                 result = await _execute_step(substitute_vars(step, variables or {}), serial, size, run_id)
                 last_err = None
                 break
+            except SoftAssertionError as e:
+                # 软断言：不重试，直接按失败处理（由下方逻辑记录并继续）
+                last_err = e
+                break
             except (ScenarioError, adb.AdbError) as e:
                 last_err = e
                 if attempt < retries and not abort.is_set():
@@ -340,11 +442,17 @@ async def _run_step_list(steps: list, serial: str, size: tuple[int, int],
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
                 state["failure_shot"] = str(path)
-            if on_fail == "continue":
+            is_soft = isinstance(last_err, SoftAssertionError)
+            if is_soft or on_fail == "continue":
                 state.setdefault("results", []).append(
-                    {"index": i + 1, "type": step["type"], "skipped": True,
+                    {"index": i + 1, "type": step["type"],
+                     "skipped": not is_soft, "soft_fail": is_soft,
                      "error": str(last_err), "elapsed": round(time.time() - started, 3)})
                 state["done"] = state.get("done", 0) + 1
+                bus.publish("info",
+                            f"场景运行[{run_id[:8]}] {serial} 步骤{i + 1}/{len(steps)} {step['type']} "
+                            f"软断言失败，继续执行: {last_err}",
+                            run_id=run_id, serial=serial, step=step.get("type"))
                 continue
             raise last_err
         bus.publish("info",
@@ -359,7 +467,8 @@ async def _run_step_list(steps: list, serial: str, size: tuple[int, int],
 
 
 async def start_run(steps: list, repeat: int, serials: list[str], variables: dict = None,
-                    scenario_name: str = "") -> str:
+                    scenario_name: str = "", collect_metrics: bool = False,
+                    metrics_interval: float = 2.0) -> str:
     validate_steps(steps)
     run_id = uuid.uuid4().hex
     abort = asyncio.Event()
@@ -370,27 +479,68 @@ async def start_run(steps: list, repeat: int, serials: list[str], variables: dic
             "scenario": scenario_name,
             "steps": steps,
             "repeat": repeat,
-            "devices": {s: {"status": "running", "done": 0, "current": 0} for s in serials},
+            "devices": {s: {"status": "running", "done": 0, "current": 0,
+                             "metrics": [] if collect_metrics else None} for s in serials},
             "abort": abort,
             "tasks": [],
             "started_at": time.time(),
+            "collect_metrics": collect_metrics,
+            "metrics_interval": max(0.5, float(metrics_interval)),
         }
     device_tasks = []
     for serial in serials:
         task = asyncio.create_task(_run_device(run_id, steps, repeat, serial, abort, variables or {}))
         device_tasks.append(task)
         _runs[run_id]["tasks"].append(task)
-    _runs[run_id]["tasks"].append(asyncio.create_task(_finalize_run(run_id, device_tasks)))
+    sampler_tasks = []
+    if collect_metrics:
+        for serial in serials:
+            sampler_tasks.append(asyncio.create_task(
+                _metrics_sampler(run_id, serial, abort, metrics_interval)))
+    _runs[run_id]["tasks"].append(asyncio.create_task(
+        _finalize_run(run_id, device_tasks, sampler_tasks)))
     return run_id
 
 
-async def _finalize_run(run_id: str, device_tasks: list) -> None:
-    """所有设备任务结束后生成并落盘测试报告。"""
+async def _metrics_sampler(run_id: str, serial: str, abort: asyncio.Event,
+                           interval: float) -> None:
+    """运行期间周期性采集设备性能指标，写入该设备的 metrics 列表。
+
+    正常结束后由 _finalize_run 取消；用户中止时随 abort 事件退出。
+    """
+    run = _runs.get(run_id)
+    if not run:
+        return
+    state = run["devices"].get(serial)
+    if not state:
+        return
+    try:
+        while not abort.is_set():
+            try:
+                m = await adb.read_metrics(serial)
+            except Exception:
+                m = {}
+            if m:
+                m["t"] = round(time.time() - run["started_at"], 2)
+                state["metrics"].append(m)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(abort.wait(), timeout=interval)
+    except asyncio.CancelledError:
+        pass
+
+
+async def _finalize_run(run_id: str, device_tasks: list, sampler_tasks: list) -> None:
+    """所有设备任务结束后停止采样、生成并落盘测试报告。"""
     for task in device_tasks:
         try:
             await task
         except Exception:
             pass
+    for task in sampler_tasks:
+        task.cancel()
+    for task in sampler_tasks:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
     run = _runs.get(run_id)
     if not run:
         return

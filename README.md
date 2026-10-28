@@ -43,6 +43,9 @@ FastAPI 后端 (narci/)
 | 图像多结果/多尺度匹配（NCC + 金字塔缩放 + 区域限定 + NMS 去重） | Airtest aircv |
 | 步骤级失败重试（retry / 退避 / continue-on-fail） | Maestro / SoloPi |
 | 测试报告持久化与导出（JSON / HTML / JUnit XML） | Airtest / Maestro / SoloPi |
+| 断言增强（正则/包含/前后缀匹配、数值比较、软断言不中止） | Maestro / SoloPi / Espresso |
+| 录制器增强（控件级录制、框选模板、录制中插入断言/截图） | AirtestIDE / Appium Inspector / Maestro Studio |
+| 性能指标采集与报告（CPU/内存/电量/温度，运行期采样） | SoloPi / Appetizer insights |
 
 ## 快速开始
 

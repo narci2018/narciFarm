@@ -22,6 +22,30 @@ def new_report_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+def _summarize_metrics(samples: list) -> dict:
+    """把性能指标采样序列整理成摘要 + 原始采样（上限 200 点，避免报告过大）。"""
+    if not samples:
+        return {"samples": 0, "series": []}
+
+    def _col(key):
+        return [m[key] for m in samples if m.get(key) is not None]
+
+    cpu, mem = _col("cpu_used_pct"), _col("mem_used_pct")
+    batt, temp = _col("battery_pct"), _col("battery_temp_c")
+    return {
+        "samples": len(samples),
+        "cpu_max": round(max(cpu), 1) if cpu else None,
+        "cpu_avg": round(sum(cpu) / len(cpu), 1) if cpu else None,
+        "mem_max": round(max(mem), 1) if mem else None,
+        "mem_avg": round(sum(mem) / len(mem), 1) if mem else None,
+        "battery_start": batt[0] if batt else None,
+        "battery_end": batt[-1] if batt else None,
+        "battery_drop": (batt[0] - batt[-1]) if len(batt) >= 2 else None,
+        "temp_max": round(max(temp), 1) if temp else None,
+        "series": samples[:200],
+    }
+
+
 def build_report(run_id: str, run: Optional[dict], scenario_name: str = "",
                  steps: Optional[list] = None) -> dict:
     """把一次场景运行整理成结构化报告。run 为 scenario._runs 中的运行字典。"""
@@ -40,6 +64,7 @@ def build_report(run_id: str, run: Optional[dict], scenario_name: str = "",
             "error": st.get("error"),
             "failure_shot": st.get("failure_shot"),
             "results": results,
+            "metrics": _summarize_metrics(st.get("metrics") or []),
             "passed": sum(1 for r in results if not r.get("skipped") and not r.get("error")),
             "failed": sum(1 for r in results if r.get("skipped") or r.get("error")),
         }
@@ -141,10 +166,11 @@ def render_junit(report: dict) -> str:
 _STYLE = (
     "body{font-family:system-ui,'Microsoft YaHei',sans-serif;margin:24px;color:#1c1c1e;background:#fff}\n"
     "h1{font-size:20px;margin:0 0 4px}\n"
+    "h2{font-size:16px;margin:24px 0 8px}\n"
     ".meta{color:#666;font-size:13px;margin-bottom:16px}\n"
     ".badge{display:inline-block;padding:2px 10px;border-radius:10px;font-size:12px;color:#fff}\n"
     ".pass{background:#2f9e44}.fail{background:#e03131}.run{background:#1971c2}\n"
-    "table{border-collapse:collapse;width:100%;font-size:13px}\n"
+    "table{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:16px}\n"
     "th,td{border:1px solid #e0e0e0;padding:6px 8px;text-align:left;vertical-align:top}\n"
     "th{background:#f5f5f5}\n"
     "tr.fail td{background:#fff5f5}\n"
@@ -176,6 +202,30 @@ def render_html(report: dict) -> str:
                 "<td>" + esc(str(detail)) + "</td>" + shot + "</tr>"
             )
     body = "\n".join(rows) or "<tr><td colspan='6' class='hint'>无步骤记录</td></tr>"
+
+    metric_rows = []
+    for serial, d in report.get("devices", {}).items():
+        m = d.get("metrics") or {}
+        if not m.get("samples"):
+            continue
+        metric_rows.append(
+            "<tr><td>" + esc(serial) + "</td>"
+            "<td>" + esc(str(m.get("samples"))) + "</td>"
+            "<td>" + esc(str(m.get("cpu_max"))) + "</td>"
+            "<td>" + esc(str(m.get("mem_max"))) + "</td>"
+            "<td>" + esc(str(m.get("battery_start"))) + " → "
+            + esc(str(m.get("battery_end"))) + "</td>"
+            "<td>" + esc(str(m.get("temp_max"))) + "</td></tr>"
+        )
+    metrics_table = ""
+    if metric_rows:
+        metrics_table = (
+            "<h2>性能指标</h2>"
+            "<table><thead><tr><th>设备</th><th>采样数</th><th>CPU 峰值%</th>"
+            "<th>内存峰值%</th><th>电量</th><th>电池温度峰值℃</th></tr></thead><tbody>"
+            + "".join(metric_rows) + "</tbody></table>"
+        )
+
     status = report.get("status", "unknown")
     badge = {"passed": "pass", "failed": "fail"}.get(status, "run")
     summary = report.get("summary", {})
@@ -196,6 +246,7 @@ def render_html(report: dict) -> str:
         "</div>\n"
         "<table><thead><tr><th>设备</th><th>#</th><th>步骤</th><th>耗时s</th><th>详情</th><th>取证</th></tr></thead>\n"
         "<tbody>\n" + body + "\n</tbody></table>\n"
+        + metrics_table +
         "</body></html>"
     )
 

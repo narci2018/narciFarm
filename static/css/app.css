@@ -270,3 +270,12 @@ html, body, .mirror-move, .device-list, .group-list, .console-out, .result-box,
 .health-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
   padding: 10px 12px; margin: 6px 0; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
 .health-item { font-size: 13px; color: var(--fg); }
+
+/* 框选模板的矩形框 */
+.crop-overlay {
+  position: absolute;
+  border: 2px dashed var(--accent, #4da3ff);
+  background: rgba(77, 163, 255, 0.16);
+  pointer-events: none;
+  z-index: 5;
+}

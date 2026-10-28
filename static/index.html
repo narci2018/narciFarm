@@ -176,6 +176,8 @@
           <div class="form-row">
             <label>名称</label><input id="sc-name">
             <label>整场景重复</label><input id="sc-repeat" type="number" min="1" value="1" class="num">
+            <label class="hint"><input type="checkbox" id="sc-collect-metrics"> 采集性能指标</label>
+            <label class="hint">采样间隔s</label><input id="sc-metrics-interval" type="number" min="0.5" value="2" class="num" style="width:60px">
           </div>
           <table class="steps-table"><tbody id="sc-steps"></tbody></table>
           <div class="form-row">
@@ -187,7 +189,8 @@
               <option value="wait">wait 等待</option><option value="shell">shell 命令</option>
               <option value="screenshot">screenshot 截图</option><option value="tap_text">tap_text 按文本点击</option>
               <option value="wait_text">wait_text 等待文本出现</option>
-              <option value="assert_text">assert_text 文本存在性断言</option>
+              <option value="assert_text">assert_text 文本存在性断言(支持正则)</option>
+              <option value="assert_value">assert_value 数值/变量比较断言</option>
               <option value="rand_wait">rand_wait 随机等待</option>
               <option value="start_activity">start_activity 拉起Activity</option>
               <option value="tap_image">tap_image 图像匹配点击</option>
@@ -534,6 +537,9 @@
     <button id="mm-send-text" class="btn small">输入</button>
     <button id="mm-paste" class="btn small" title="文本含中文时自动走剪贴板粘贴路径">粘贴</button>
     <button id="mm-clipboard" class="btn small">存剪贴板</button>
+    <button id="mm-crop-tpl" class="btn small" title="在画面上框选区域存为图像模板">▣ 框选模板</button>
+    <button id="mm-add-assert" class="btn small" title="向场景插入文本断言步骤">✔ 断言</button>
+    <button id="mm-add-shot" class="btn small" title="向场景插入截图步骤">📷 截图</button>
     <button id="mm-record-video" class="btn small">⏺ 录像</button>
     <button id="mm-shot" class="btn small">截图</button>
     <div class="win-ctrl">
@@ -603,12 +609,12 @@
 </div>
 <!-- posthog-js 以 ES module 引入（无构建步骤）：importmap 把裸导入名指到本地 SDK 副本 -->
 <script type="importmap">
-{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=046"}}
+{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=047"}}
 </script>
-<script src="/static/js/api.js?v=046"></script>
-<script type="module" src="/static/js/analytics.js?v=046"></script>
-<script src="/static/js/mirror.js?v=046"></script>
-<script src="/static/js/scenario.js?v=046"></script>
-<script src="/static/js/app.js?v=046"></script>
+<script src="/static/js/api.js?v=047"></script>
+<script type="module" src="/static/js/analytics.js?v=047"></script>
+<script src="/static/js/mirror.js?v=047"></script>
+<script src="/static/js/scenario.js?v=047"></script>
+<script src="/static/js/app.js?v=047"></script>
 </body>
 </html>

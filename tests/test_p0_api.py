@@ -179,3 +179,57 @@ def _async(value):
     async def _inner():
         return value
     return _inner()
+
+
+# ---------- 坐标 -> 控件解析（控件级录制） ----------
+
+def test_resolve_at_returns_selector(api, monkeypatch):
+    tc, headers = api
+    import xml.etree.ElementTree as ET
+    xml = ('<hierarchy>'
+           '<node text="设置" resource-id="com.x:id/title" class="android.widget.TextView" '
+           'content-desc="" package="com.x" bounds="[0,0][200,80]"/>'
+           '</hierarchy>')
+    monkeypatch.setattr(nm.adb, "_dump_xml", lambda serial, timeout=25: _async(ET.fromstring(xml)))
+
+    async def fake_size(serial):
+        return (1080, 2400)
+
+    monkeypatch.setattr(nm.adb, "get_screen_size", fake_size)
+    r = tc.post("/api/devices/DEV01/resolve-at",
+                json={"x_pct": 0.0926, "y_pct": 0.0167}, headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["found"] is True
+    assert body["selector"]["kind"] == "id"
+    assert body["selector"]["value"] == "com.x:id/title"
+
+
+def test_resolve_at_reports_miss(api, monkeypatch):
+    tc, headers = api
+    import xml.etree.ElementTree as ET
+    xml = ('<hierarchy><node text="x" resource-id="a" class="c" '
+           'content-desc="" package="p" bounds="[0,0][10,10]"/></hierarchy>')
+    monkeypatch.setattr(nm.adb, "_dump_xml", lambda serial, timeout=25: _async(ET.fromstring(xml)))
+
+    async def fake_size(serial):
+        return (1080, 2400)
+
+    monkeypatch.setattr(nm.adb, "get_screen_size", fake_size)
+    r = tc.post("/api/devices/DEV01/resolve-at",
+                json={"x_pct": 0.9, "y_pct": 0.9}, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["found"] is False
+
+
+def test_metrics_endpoint(api, monkeypatch):
+    tc, headers = api
+
+    async def fake_metrics(serial):
+        return {"battery_pct": 77, "cpu_used_pct": 12.0}
+
+    monkeypatch.setattr(nm.adb, "read_metrics", fake_metrics)
+    r = tc.get("/api/devices/DEV01/metrics", headers=headers)
+    assert r.status_code == 200
+    # 该端点直接返回指标字段（并附 fps/streaming），不包一层 metrics
+    assert r.json()["battery_pct"] == 77

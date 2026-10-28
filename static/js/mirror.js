@@ -150,6 +150,8 @@ class Mirror {
     this.closed = false;
     this.fallback = null;
     this._gesture = null;
+    this.cropMode = false;
+    this._crop = null;
   }
 
   targets() {
@@ -328,6 +330,7 @@ class Mirror {
       this._gesture = { x0: nx, y0: ny, t0: performance.now(), moved: false };
     };
     const moveGesture = (e) => {
+      if (this.cropMode) { this._cropMove(e); return; }
       if (!this._gesture) return;
       const { nx, ny } = this._norm(e);
       if (Math.hypot(nx - this._gesture.x0, ny - this._gesture.y0) > 0.012) this._gesture.moved = true;
@@ -337,6 +340,7 @@ class Mirror {
     // PointerEvent 优先(含移动追踪, 拖拽=滑动); 不支持的环境回退鼠标路径。两路径互斥, 避免双重手势。
     if ('PointerEvent' in window) {
       cv.addEventListener('pointerdown', (e) => {
+        if (this.cropMode) { this._cropStart(e); return; }
         if (this.fallback) return;
         try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 捕获失败不丢弃手势 */ }
         const { nx, ny } = this._norm(e);
@@ -345,12 +349,14 @@ class Mirror {
       });
       cv.addEventListener('pointermove', moveGesture);
       cv.addEventListener('pointerup', (e) => {
+        if (this.cropMode) { this._cropEnd(e); return; }
         if (!this._gesture) return;
         this._endGesture(e);
       });
       cv.addEventListener('pointercancel', () => { this._gesture = null; });
     } else {
       cv.addEventListener('mousedown', (e) => {
+        if (this.cropMode) { this._cropStart(e); return; }
         if (this.fallback) return;
         const { nx, ny } = this._norm(e);
         startGesture(nx, ny);
@@ -358,6 +364,7 @@ class Mirror {
       });
       cv.addEventListener('mousemove', moveGesture);
       cv.addEventListener('mouseup', (e) => {
+        if (this.cropMode) { this._cropEnd(e); return; }
         if (!this._gesture) return;
         this._endGesture(e);
       });
@@ -395,6 +402,59 @@ class Mirror {
       this.inject('tap', p);
       this._record(Object.assign({ type: 'tap' }, p));
     }
+  }
+
+  // 框选模式：拖出矩形 -> 回调 onCrop(设备坐标系的矩形)
+  _cropStart(e) {
+    const r = this.canvas.getBoundingClientRect();
+    this._crop = { x0: e.clientX - r.left, y0: e.clientY - r.top,
+                   x1: e.clientX - r.left, y1: e.clientY - r.top };
+    this.canvas.style.cursor = 'crosshair';
+  }
+
+  _cropMove(e) {
+    if (!this._crop) return;
+    const r = this.canvas.getBoundingClientRect();
+    this._crop.x1 = e.clientX - r.left;
+    this._crop.y1 = e.clientY - r.top;
+    this._drawCropOverlay();
+  }
+
+  _cropEnd() {
+    const c = this._crop; this._crop = null;
+    this.canvas.style.cursor = '';
+    this._clearCropOverlay();
+    if (!c) return;
+    const r = this.canvas.getBoundingClientRect();
+    const sx = (this.width || r.width) / (r.width || 1);
+    const sy = (this.height || r.height) / (r.height || 1);
+    const x = Math.max(0, Math.round(Math.min(c.x0, c.x1) * sx));
+    const y = Math.max(0, Math.round(Math.min(c.y0, c.y1) * sy));
+    const w = Math.max(2, Math.round(Math.abs(c.x1 - c.x0) * sx));
+    const h = Math.max(2, Math.round(Math.abs(c.y1 - c.y0) * sy));
+    if (w < 4 || h < 4) return;
+    if (this.opts.onCrop) this.opts.onCrop({ x, y, w, h });
+  }
+
+  _drawCropOverlay() {
+    const c = this._crop; if (!c) return;
+    let el = this.stage.querySelector('.crop-overlay');
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'crop-overlay';
+      this.stage.appendChild(el);
+    }
+    const r = this.canvas.getBoundingClientRect();
+    const sr = this.stage.getBoundingClientRect();
+    el.style.left = (r.left - sr.left + Math.min(c.x0, c.x1)) + 'px';
+    el.style.top = (r.top - sr.top + Math.min(c.y0, c.y1)) + 'px';
+    el.style.width = Math.abs(c.x1 - c.x0) + 'px';
+    el.style.height = Math.abs(c.y1 - c.y0) + 'px';
+  }
+
+  _clearCropOverlay() {
+    const el = this.stage.querySelector('.crop-overlay');
+    if (el) el.remove();
   }
 
   _norm(e) {

@@ -26,4 +26,7 @@ logs/
 
 # 工具自身的工作目录（非项目文件）
 .freebuff/
+*.tmp
+.dbg*.png
+.p1_check.js
 logs/
