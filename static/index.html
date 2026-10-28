@@ -8,7 +8,20 @@
 <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
-<header class="topbar">
+<!-- 登录页 -->
+<div id="login-view" class="login-view hidden">
+  <div class="login-card">
+    <div class="login-logo">🐾 narciFarm</div>
+    <div class="login-sub">设备农场管理平台</div>
+    <input id="login-user" placeholder="用户名" autocomplete="username">
+    <input id="login-pass" type="password" placeholder="密码" autocomplete="current-password">
+    <button id="login-btn" class="btn primary" style="width:100%">登录</button>
+    <div id="login-err" class="hint" style="color:var(--bad);min-height:18px"></div>
+    <div class="hint">首次使用默认账号 admin / admin</div>
+  </div>
+</div>
+
+<header class="topbar hidden" id="main-header">
   <div class="brand">🐾 narciFarm</div>
   <div class="topstats">
     <span id="st-adb" class="stat-dot"></span><span class="stat-label">adb</span>
@@ -16,6 +29,7 @@
     <span id="st-online" class="stat-num">0</span><span class="stat-label">在线设备</span>
     <span id="st-version" class="stat-dot" style="color: var(--dim); margin-left: 12px;">v</span>
   </div>
+  <div class="topuser"><span id="user-badge" class="hint"></span><button id="btn-logout" class="btn small">退出</button></div>
   <div class="topactions">
     <button id="btn-refresh" class="btn">刷新设备</button>
     <button id="btn-scan" class="btn">扫描局域网</button>
@@ -28,7 +42,7 @@
   </div>
 </header>
 
-<div class="layout">
+<div class="layout hidden" id="main-layout">
   <aside class="sidebar">
     <div class="side-title">设备（勾选 = 选中目标）</div>
     <ul id="device-list" class="device-list"></ul>
@@ -54,6 +68,7 @@
       <button class="tab" data-tab="console">ADB 控制台</button>
       <button class="tab" data-tab="apps">应用管理</button>
       <button class="tab" data-tab="devtools">开发工具</button>
+      <button class="tab hidden" data-tab="team" id="tab-team-btn">团队</button>
       <button class="tab" data-tab="captures">截图库</button>
       <button class="tab" data-tab="logs">日志</button>
     </nav>
@@ -62,8 +77,10 @@
       <div class="toolbar">
         <label><input type="checkbox" id="ov-autorefresh" checked> 快照自动刷新</label>
         <span class="hint">点击快照打开投屏窗口；投屏内可将操作广播到左侧勾选设备</span>
+        <button id="bk-refresh" class="btn small">刷新预约</button>
       </div>
       <div id="device-grid" class="device-grid"></div>
+      <div id="booking-list" class="result-box" style="margin-top:10px"></div>
     </section>
 
     <section id="tab-broadcast" class="tabpane">
@@ -230,6 +247,28 @@
           <button id="cs-run" class="btn primary">执行</button>
         </div>
         <pre id="cs-out" class="console-out"></pre>
+      </div>
+    </section>
+
+    <section id="tab-team" class="tabpane">
+      <div class="pane-card">
+        <h3>用户管理</h3>
+        <div class="form-row">
+          <input id="tu-name" placeholder="用户名">
+          <input id="tu-pass" placeholder="密码">
+          <select id="tu-role"><option value="user">成员</option><option value="admin">管理员</option></select>
+          <button id="tu-add" class="btn primary small">创建用户</button>
+        </div>
+        <table class="data-table" id="team-users"><thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>分区管理</h3>
+        <div class="form-row">
+          <input id="tp-name" placeholder="分区名">
+          <input id="tp-desc" placeholder="描述">
+          <button id="tp-add" class="btn primary small">创建分区</button>
+        </div>
+        <table class="data-table" id="team-parts"><thead><tr><th>名称</th><th>规模</th><th>操作</th></tr></thead><tbody></tbody></table>
       </div>
     </section>
 

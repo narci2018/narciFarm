@@ -1,31 +1,43 @@
 /* 轻量 API 封装 + 通用 UI 工具 */
+const AuthToken = {
+  get() { try { return localStorage.getItem("narciFarm.token"); } catch (e) { return null; } },
+  set(t) { try { localStorage.setItem("narciFarm.token", t); } catch (e) {} },
+  clear() { try { localStorage.removeItem("narciFarm.token"); } catch (e) {} },
+};
+
 const API = {
   async get(url) {
-    const r = await fetch(url);
+    const r = await fetch(url, { headers: AuthToken.get() ? { Authorization: "Bearer " + AuthToken.get() } : {} });
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
     return r.json();
   },
   async post(url, body) {
     const r = await fetch(url, {
       method: 'POST',
-      headers: body instanceof FormData ? undefined : { 'Content-Type': 'application/json' },
+      headers: Object.assign(
+        body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
+        AuthToken.get() ? { Authorization: "Bearer " + AuthToken.get() } : {}),
       body: body instanceof FormData ? body : JSON.stringify(body || {}),
     });
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
     return r.json();
   },
   async put(url, body) {
-    const r = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    const r = await fetch(url, { method: 'PUT', headers: Object.assign({ 'Content-Type': 'application/json' }, AuthToken.get() ? { Authorization: "Bearer " + AuthToken.get() } : {}), body: JSON.stringify(body || {}) });
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
     return r.json();
   },
   async del(url) {
-    const r = await fetch(url, { method: 'DELETE' });
+    const r = await fetch(url, { headers: AuthToken.get() ? { Authorization: "Bearer " + AuthToken.get() } : {} });
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
     return r.json();
   },
   wsUrl(path) {
     return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`;
+  },
+  wsAuthed(path) {
+    const t = AuthToken.get();
+    return t ? `${this.wsUrl(path)}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(t)}` : this.wsUrl(path);
   },
 };
 

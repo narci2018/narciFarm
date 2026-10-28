@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -135,8 +135,15 @@ async def refresh_devices() -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.connect()
-    _background.append(asyncio.create_task(_discovery_loop()))
-    _background.append(asyncio.create_task(scheduler.scheduler_loop()))
+    if os.environ.get("NARCI_TEST_MODE"):
+        bus.info("测试模式: 跳过后台循环")
+    else:
+        _background.append(asyncio.create_task(_discovery_loop()))
+        _background.append(asyncio.create_task(scheduler.scheduler_loop()))
+    if not db.list_users():
+        ph, salt = _auth.hash_password("admin")
+        db.create_user("admin", ph, salt, "admin")
+        bus.warn("已创建默认管理员: admin / admin —— 请尽快登录修改密码")
     bus.info(f"narciFarm 已启动: http://{HOST}:{PORT}")
     yield
     bus.info("lifespan 关闭: 停止后台任务与投屏会话")
@@ -200,7 +207,7 @@ async def api_diag(request: Request):
 
 
 @app.get("/api/devices")
-async def api_devices(refresh: bool = False):
+async def api_devices(refresh: bool = False, request: Request = None):
     if refresh:
         await refresh_devices()
     adb_list = {d["serial"]: d for d in await adb.list_devices()}
@@ -215,6 +222,23 @@ async def api_devices(refresh: bool = False):
         if serial not in known:
             db.upsert_device(serial, model=d["model"])
             out.append({**(db.get_device(serial) or {"serial": serial}), "state": d["state"], "present": True})
+    # 非管理员: 只返回自己分区的设备
+    user = getattr(request.state, "user", None)
+    if user and user.get("role") != "admin":
+        mine = set()
+        for pid in db.user_partitions(user["id"]):
+            mine.update(db.partition_devices(pid))
+        out = [d for d in out if d["serial"] in mine]
+        # 附加预约状态
+        for d in out:
+            b = db.active_booking(d["serial"])
+            d["booked"] = bool(b)
+            d["booked_by_me"] = bool(b and b["user_id"] == user["id"])
+    else:
+        for d in out:
+            b = db.active_booking(d["serial"])
+            d["booked"] = bool(b)
+            d["booked_by_me"] = False
     return out
 
 
@@ -333,7 +357,8 @@ async def api_input_multi(body: dict):
 
 
 @app.post("/api/devices/{serial}/input")
-async def api_input(serial: str, body: dict):
+async def api_input(serial: str, body: dict, request: Request):
+    _booking_guard(serial, request.state.user)
     try:
         note = await _input_action(serial, body["action"], body.get("params", {}))
     except adb.AdbError as e:
@@ -344,7 +369,8 @@ async def api_input(serial: str, body: dict):
 
 
 @app.post("/api/broadcast")
-async def api_broadcast(body: dict):
+async def api_broadcast(body: dict, request: Request):
+    _booking_guard_multi(body.get("targets", []), request.state.user)
     targets = _targets_body(body)
     action = body.get("action", "tap")
     params = body.get("params", {})
@@ -580,6 +606,11 @@ async def ws_events(ws: WebSocket):
 @app.websocket("/ws/mirror/{serial}")
 async def ws_mirror(ws: WebSocket, serial: str):
     await ws.accept()
+    user = _auth.user_from_token(ws.query_params.get("token"))
+    if not user:
+        await ws.send_json({"type": "error", "msg": "未登录"})
+        await ws.close()
+        return
     control = ws.query_params.get("control", "1") != "0"
     quality = ws.query_params.get("quality", "medium")
     presets = {
@@ -619,7 +650,12 @@ async def ws_mirror(ws: WebSocket, serial: str):
                 bus.warn(f"[{serial}] 非法 WS 指令(非JSON): {text[:100]!r}")
                 continue
             try:
+                _booking_guard(serial, user)
                 await _handle_ws_command(ws, client, data)
+            except HTTPException as e:
+                bus.warn(f"[{serial}] 预约守卫拦截: {e.detail}")
+                with suppress(Exception):
+                    await ws.send_json({"type": "error", "msg": e.detail})
             except Exception as e:  # noqa: BLE001 - 注入失败必须呈现给前端而非断流
                 bus.error(f"[{serial}] 处理指令 {data.get('action')} 失败: {type(e).__name__}: {e}")
                 with suppress(Exception):
@@ -825,6 +861,172 @@ async def api_template_preview(name: str):
     if not p.exists():
         raise HTTPException(404, "模板不存在")
     return FileResponse(str(p))
+
+
+
+
+# ---------- 团队平台: 认证 / 用户 / 分区 / 预约 ----------
+
+from fastapi.responses import JSONResponse
+
+from . import auth as _auth
+
+
+@app.middleware("http")
+async def auth_middleware(request, call_next):
+    """保护 /api/*(登录除外); 用户注入 request.state.user。"""
+    path = request.url.path
+    if path.startswith("/api/") and path not in ("/api/login",):
+        user = _auth.user_from_token(_auth.extract_token(request))
+        if not user:
+            return JSONResponse({"detail": "未登录或会话已过期"}, status_code=401)
+        request.state.user = user
+    return await call_next(request)
+
+
+@app.post("/api/login")
+async def api_login(body: dict):
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", ""))
+    user = db.get_user_by_name(username)
+    if not user or not _auth.verify_password(password, user["password_hash"], user["salt"]):
+        raise HTTPException(401, "用户名或密码错误")
+    token = _auth.create_session(user["id"])
+    bus.info(f"用户登录: {username} ({user['role']})")
+    return {"token": token, "user": {"id": user["id"], "username": username, "role": user["role"]}}
+
+
+@app.post("/api/logout")
+async def api_logout(request: Request):
+    token = _auth.extract_token(request)
+    if token:
+        _auth.destroy_session(token)
+    return {"ok": True}
+
+
+@app.get("/api/me")
+async def api_me(request: Request):
+    user = request.state.user
+    return {"user": user, "partitions": db.user_partitions(user["id"])}
+
+
+@app.get("/api/users")
+async def api_users(_=Depends(_auth.require_admin)):
+    return db.list_users()
+
+
+@app.post("/api/users")
+async def api_create_user(body: dict, _=Depends(_auth.require_admin)):
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", ""))
+    role = str(body.get("role", "user"))
+    if not username or not password:
+        raise HTTPException(400, "用户名和密码不能为空")
+    if role not in ("admin", "user"):
+        raise HTTPException(400, "角色必须是 admin 或 user")
+    if db.get_user_by_name(username):
+        raise HTTPException(400, f"用户已存在: {username}")
+    ph, salt = _auth.hash_password(password)
+    return db.create_user(username, ph, salt, role)
+
+
+@app.delete("/api/users/{user_id}")
+async def api_delete_user(user_id: int, _=Depends(_auth.require_admin)):
+    if user_id == 1:
+        raise HTTPException(400, "不能删除首个管理员")
+    db.delete_user(user_id)
+    return {"ok": True}
+
+
+# ---------- 分区 ----------
+
+@app.get("/api/partitions")
+async def api_partitions(request: Request):
+    parts = db.list_partitions()
+    if request.state.user.get("role") != "admin":
+        mine = set(db.user_partitions(request.state.user["id"]))
+        parts = [p for p in parts if p["id"] in mine]
+    return parts
+
+
+@app.post("/api/partitions")
+async def api_create_partition(body: dict, _=Depends(_auth.require_admin)):
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "分区名不能为空")
+    return db.create_partition(name, str(body.get("description", "")))
+
+
+@app.delete("/api/partitions/{partition_id}")
+async def api_delete_partition(partition_id: int, _=Depends(_auth.require_admin)):
+    db.delete_partition(partition_id)
+    return {"ok": True}
+
+
+@app.post("/api/partitions/{partition_id}/members")
+async def api_set_members(partition_id: int, body: dict, _=Depends(_auth.require_admin)):
+    db.set_partition_members(partition_id, [int(x) for x in body.get("user_ids", [])])
+    return {"ok": True}
+
+
+@app.post("/api/partitions/{partition_id}/devices")
+async def api_set_devices(partition_id: int, body: dict, _=Depends(_auth.require_admin)):
+    db.set_partition_devices(partition_id, [str(x) for x in body.get("serials", [])])
+    return {"ok": True}
+
+
+# ---------- 预约 ----------
+
+@app.get("/api/bookings")
+async def api_bookings(request: Request):
+    user = request.state.user
+    if user.get("role") == "admin":
+        return db.list_bookings()
+    return db.list_bookings(user["id"])
+
+
+@app.post("/api/bookings")
+async def api_create_booking(body: dict, request: Request):
+    user = request.state.user
+    serial = str(body.get("serial", ""))
+    start_ts = float(body.get("start_ts", 0))
+    end_ts = float(body.get("end_ts", 0))
+    if end_ts <= start_ts:
+        raise HTTPException(400, "结束时间必须晚于开始时间")
+    # 分区校验: 只能预约自己分区内的设备
+    if user.get("role") != "admin":
+        mine = set()
+        for pid in db.user_partitions(user["id"]):
+            mine.update(db.partition_devices(pid))
+        if serial not in mine:
+            raise HTTPException(403, "该设备不在你的分区内")
+    # 冲突校验: 同设备时间重叠
+    now = time.time()
+    for b in db.list_bookings():
+        if b["serial"] == serial and not (b["end_ts"] <= start_ts or b["start_ts"] >= end_ts):
+            raise HTTPException(409, f"时间冲突: {serial} 已被 {b.get('username', '?')} 预约")
+    return db.create_booking(user["id"], serial, start_ts, end_ts, str(body.get("note", "")))
+
+
+@app.delete("/api/bookings/{booking_id}")
+async def api_delete_booking(booking_id: int, request: Request):
+    user = request.state.user
+    db.delete_booking(booking_id, None if user.get("role") == "admin" else user["id"])
+    return {"ok": True}
+
+
+def _booking_guard_multi(serials: list, user: dict) -> None:
+    for serial in dict.fromkeys(serials):
+        _booking_guard(serial, user)
+
+
+def _booking_guard(serial: str, user: dict) -> None:
+    """预约占用强制: 他人有效预约期间禁止控制。"""
+    if user.get("role") == "admin":
+        return
+    b = db.active_booking(serial)
+    if b and b["user_id"] != user["id"]:
+        raise HTTPException(409, f"设备已被 {b.get('username', '?')} 预约占用")
 
 
 @app.get("/metrics")

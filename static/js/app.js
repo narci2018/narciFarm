@@ -64,6 +64,25 @@ async function init() {
   bindConsole();
   bindApps();
   bindDevTools();
+  $('login-btn').onclick = doLogin;
+  $('login-pass').onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
+  $('btn-logout').onclick = doLogout;
+  $('bk-refresh').onclick = loadMyBookings;
+  $('tu-add').onclick = async () => {
+    const username = $('tu-name').value.trim();
+    const password = $('tu-pass').value;
+    if (!username || !password) return toast('请输入用户名和密码', 'error');
+    await API.post('/api/users', { username, password, role: $('tu-role').value });
+    toast('用户已创建', 'ok');
+    loadTeam();
+  };
+  $('tp-add').onclick = async () => {
+    const name = $('tp-name').value.trim();
+    if (!name) return;
+    await API.post('/api/partitions', { name, description: $('tp-desc').value });
+    toast('分区已创建', 'ok');
+    loadTeam();
+  };
   bindCaptures();
   bindModal();
   connectEventStream();
@@ -78,6 +97,7 @@ async function init() {
   setInterval(() => refreshDevices(true), 3000);
   setInterval(refreshRuns, 5000);
   setInterval(snapshotTicker, 1000);
+  setInterval(loadMyBookings, 15000);
   setInterval(pollStreamStats, 3000);
 }
 
@@ -157,6 +177,12 @@ function renderDeviceGrid() {
         <img class="shot" alt="snapshot">
         <div class="meta"><span class="dstate"></span><span class="name"></span></div>`;
       card.querySelector('.shot').onclick = () => openMirror(d.serial);
+      const bk = document.createElement('button');
+      bk.className = 'btn small';
+      bk.textContent = '预约';
+      bk.style.marginLeft = '4px';
+      bk.onclick = () => bookDevice(d.serial);
+      card.querySelector('.meta').appendChild(bk);
       grid.appendChild(card);
     }
     card.dataset.serial = d.serial;
@@ -303,6 +329,8 @@ function bindTabs() {
       if (tab.dataset.tab === 'apps') loadApps();
       if (tab.dataset.tab === 'devtools') refreshDevTools();
       if (tab.dataset.tab === 'scenario') loadTemplates();
+      if (tab.dataset.tab === 'team') loadTeam();
+      if (tab.dataset.tab === 'overview') loadMyBookings();
       if (tab.dataset.tab === 'schedule') refreshSchedules();
     };
   });
@@ -1100,4 +1128,157 @@ function renderPerf() {
   ].map(([label, vals, color]) => `<div class="perf-card"><div class="perf-label">${label}</div>${sparkline(vals, color)}</div>`).join('');
 }
 
+
+/* ---------- 认证 ---------- */
+
+async function initAuth() {
+  const token = AuthToken.get();
+  if (!token) return showLogin();
+  try {
+    const r = await API.get("/api/me");
+    State.user = r.user;
+    showMain();
+  } catch (e) {
+    AuthToken.clear();
+    showLogin();
+  }
+}
+
+function showLogin() {
+  $('login-view').classList.remove('hidden');
+  $('main-header').classList.add('hidden');
+  $('main-layout').classList.add('hidden');
+}
+
+function showMain() {
+  $('login-view').classList.add('hidden');
+  $('main-header').classList.remove('hidden');
+  $('main-layout').classList.remove('hidden');
+  const badge = $('user-badge');
+  if (badge) {
+    badge.textContent = `${State.user.username} · ${State.user.role === 'admin' ? '管理员' : '成员'}`;
+    badge.className = 'hint ' + (State.user.role === 'admin' ? 'ok' : '');
+  }
+  $('tab-team-btn').classList.toggle('hidden', State.user.role !== 'admin');
+  }
+
+async function doLogin() {
+  const username = $('login-user').value.trim();
+  const password = $('login-pass').value;
+  $('login-err').textContent = '';
+  if (!username || !password) { $('login-err').textContent = '请输入用户名和密码'; return; }
+  try {
+    const r = await API.post('/api/login', { username, password });
+    AuthToken.set(r.token);
+    State.user = r.user;
+    showMain();
+  } catch (e) {
+    $('login-err').textContent = e.message.replace(/^\d+ /, '').replace('用户名或密码错误', '用户名或密码错误');
+  }
+}
+
+async function doLogout() {
+  try { await API.post('/api/logout'); } catch (e) {}
+  AuthToken.clear();
+  State.user = null;
+  showLogin();
+}
+
+/* ---------- 预约 ---------- */
+
+async function loadMyBookings() {
+  try {
+    const list = await API.get('/api/bookings');
+    const box = $('booking-list');
+    if (!box) return;
+    box.innerHTML = list.length ? '' : '<span class="hint">暂无预约</span>';
+    for (const b of list) {
+      const div = document.createElement('div');
+      div.className = 'hint';
+      const st = new Date(b.start_ts * 1000).toLocaleString('zh-CN', { hour12: false });
+      const en = new Date(b.end_ts * 1000).toLocaleString('zh-CN', { hour12: false });
+      div.innerHTML = `<span class="dserial">${esc(b.serial)}</span> ${st} ~ ${en}
+        <button class="btn small danger" data-bid="${b.id}">取消</button>`;
+      box.appendChild(div);
+    }
+    box.querySelectorAll('[data-bid]').forEach(btn => btn.onclick = async () => {
+      await API.del(`/api/bookings/${btn.dataset.bid}`);
+      loadMyBookings();
+    });
+  } catch (e) {}
+}
+
+async function bookDevice(serial) {
+  const ok = await showConfirm({
+    title: '预约设备', icon: '📅',
+    message: `${serial}
+将从现在起预约 1 小时(可在“设备总览”查看/取消)。预约期间他人无法控制该设备。`,
+    okText: '预约 1 小时', cancelText: '取消',
+  });
+  if (!ok) return;
+  const now = Date.now() / 1000;
+  try {
+    await API.post('/api/bookings', { serial, start_ts: now, end_ts: now + 3600, note: '' });
+    toast('预约成功', 'ok');
+    loadMyBookings();
+    refreshDevices(true);
+  } catch (e) { toast(e.message.replace(/^\d+ /, ''), 'error', 6000); }
+}
+
+/* ---------- 团队管理(管理员) ---------- */
+
+async function loadTeam() {
+  if (!State.user || State.user.role !== 'admin') return;
+  const [users, parts] = await Promise.all([API.get('/api/users'), API.get('/api/partitions')]);
+  // 用户表
+  const utb = $('team-users').querySelector('tbody');
+  utb.innerHTML = '';
+  for (const u of users) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${u.id}</td><td>${esc(u.username)}</td><td>${u.role === 'admin' ? '管理员' : '成员'}</td>
+      <td><button class="btn small danger" data-del-user="${u.id}">删除</button></td>`;
+    utb.appendChild(tr);
+  }
+  utb.querySelectorAll('[data-del-user]').forEach(b => b.onclick = async () => {
+    const ok = await showConfirm({ title: '删除用户', message: `确认删除用户 #${b.dataset.delUser}？`, okText: '删除', danger: true });
+    if (!ok) return;
+    await API.del(`/api/users/${b.dataset.delUser}`);
+    loadTeam();
+  });
+  // 分区表
+  const ptb = $('team-parts').querySelector('tbody');
+  ptb.innerHTML = '';
+  for (const p of parts) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(p.name)}</td><td class="hint">${(p.members || []).length} 成员 / ${(p.devices || []).length} 设备</td>
+      <td><button class="btn small" data-edit-part="${p.id}">配置</button>
+          <button class="btn small danger" data-del-part="${p.id}">删除</button></td>`;
+    ptb.appendChild(tr);
+  }
+  ptb.querySelectorAll('[data-del-part]').forEach(b => b.onclick = async () => {
+    await API.del(`/api/partitions/${b.dataset.delPart}`);
+    loadTeam();
+  });
+  ptb.querySelectorAll('[data-edit-part]').forEach(b => b.onclick = () => editPartition(b.dataset.editPart));
+}
+
+async function editPartition(pid) {
+  const parts = await API.get('/api/partitions');
+  const p = parts.find(x => String(x.id) === String(pid));
+  if (!p) return;
+  const users = await API.get('/api/users');
+  const devices = State.devices.map(d => d.serial);
+  const memberStr = await showPrompt({ title: '分区成员', message: '用户ID(逗号分隔)', defaultValue: (p.members || []).join(',') });
+  if (memberStr === null) return;
+  const deviceStr = await showPrompt({ title: '分区设备', message: '设备序列号(逗号分隔)', defaultValue: (p.devices || []).join(',') });
+  if (deviceStr === null) return;
+  await API.post(`/api/partitions/${pid}/members`, { user_ids: memberStr.split(',').map(x => parseInt(x)).filter(Boolean) });
+  await API.post(`/api/partitions/${pid}/devices`, { serials: deviceStr.split(',').map(x => x.trim()).filter(Boolean) });
+  toast('分区已更新', 'ok');
+  loadTeam();
+}
+
+
 init();
+
+initAuth();

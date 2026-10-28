@@ -1,4 +1,9 @@
 """统一注入入口 /api/input 回归测试（v0.3.0 重构后 PC 操作手机的唯一链路）。"""
+import os
+import tempfile
+
+os.environ["NARCI_DATA_DIR"] = tempfile.mkdtemp(prefix="narci_test_")
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -16,13 +21,16 @@ def api(monkeypatch):
 
     monkeypatch.setattr(nm, "_input_action", fake_input_action)
     with TestClient(nm.app) as tc:
-        yield tc, called
+        r = tc.post("/api/login", json={"username": "admin", "password": "admin"})
+        assert r.status_code == 200, f"测试登录失败: {r.text}"
+        headers = {"Authorization": "Bearer " + r.json()["token"]}
+        yield tc, called, headers
 
 
 def test_input_multi_success(api):
-    tc, called = api
+    tc, called, headers = api
     r = tc.post("/api/input", json={"serials": ["DEV01", "DEV02"],
-                                    "action": "tap", "params": {"x_pct": 0.5, "y_pct": 0.5}})
+                                    "action": "tap", "params": {"x_pct": 0.5, "y_pct": 0.5}}, headers=headers)
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
@@ -32,9 +40,9 @@ def test_input_multi_success(api):
 
 
 def test_input_multi_partial_failure(api):
-    tc, called = api
+    tc, called, headers = api
     r = tc.post("/api/input", json={"serials": ["DEV01", "BROKEN01"],
-                                    "action": "key", "params": {"keycode": "home"}})
+                                    "action": "key", "params": {"keycode": "home"}}, headers=headers)
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False
@@ -43,21 +51,21 @@ def test_input_multi_partial_failure(api):
 
 
 def test_input_multi_rejects_unknown_action(api):
-    tc, _ = api
-    r = tc.post("/api/input", json={"serials": ["DEV01"], "action": "hack", "params": {}})
+    tc, _, headers = api
+    r = tc.post("/api/input", json={"serials": ["DEV01"], "action": "hack", "params": {}}, headers=headers)
     assert r.status_code == 400
 
 
 def test_input_multi_surfaces_wake_note(api, monkeypatch):
     """设备熄屏被自动唤醒时，说明必须回给前端（否则用户以为点击没反应）。"""
-    tc, _ = api
+    tc, _, headers = api
 
     async def fake_note(serial, action, params):
         return "设备熄屏已自动唤醒；若停在锁屏请手动解锁后重新操作"
 
     monkeypatch.setattr(nm, "_input_action", fake_note)
     r = tc.post("/api/input", json={"serials": ["DEV01"],
-                                    "action": "tap", "params": {"x_pct": 0.5, "y_pct": 0.5}})
+                                    "action": "tap", "params": {"x_pct": 0.5, "y_pct": 0.5}}, headers=headers)
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
@@ -65,8 +73,9 @@ def test_input_multi_surfaces_wake_note(api, monkeypatch):
 
 
 def test_input_multi_requires_targets(api):
-    tc, called = api
-    r = tc.post("/api/input", json={"serials": [], "action": "tap", "params": {}})
+    headers = api[2]
+    tc, called, headers = api
+    r = tc.post("/api/input", json={"serials": [], "action": "tap", "params": {}}, headers=headers)
     assert r.status_code == 400
     assert called == []
 
@@ -99,7 +108,9 @@ def test_ws_reports_unexpected_acquire_error():
     monkeypatch.setattr(nm, "hub", BoomHub())
     try:
         with TestClient(nm.app) as tc:
-            with tc.websocket_connect("/ws/mirror/FAKE001?control=1") as ws:
+            lr = tc.post("/api/login", json={"username": "admin", "password": "admin"})
+            token = lr.json()["token"]
+            with tc.websocket_connect(f"/ws/mirror/FAKE001?control=1&token={token}") as ws:
                 msg = ws.receive_json()
                 assert msg["type"] == "error"
                 assert "boom-acquire" in msg["msg"]
@@ -109,6 +120,8 @@ def test_ws_reports_unexpected_acquire_error():
 
 def test_ws_rejects_injection_actions(api):
     """重构后 WS 不再承载注入: tap 必须收到引导性错误帧而非静默丢弃。"""
+    tc, _, headers = api
+
     class FakeClient:
         serial = "FAKE001"
         control_enabled = True
@@ -144,7 +157,7 @@ def test_ws_rejects_injection_actions(api):
     monkeypatch.setattr(nm, "hub", FakeHub())
     try:
         with TestClient(nm.app) as tc:
-            with tc.websocket_connect("/ws/mirror/FAKE001?control=1") as ws:
+            with tc.websocket_connect(f"/ws/mirror/FAKE001?control=1&token={headers['Authorization'].split(' ')[1]}") as ws:
                 ws.receive_json()  # session
                 ws.receive_json()  # device
                 ws.send_json({"action": "tap", "nx": 0.5, "ny": 0.5})

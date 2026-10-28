@@ -14,6 +14,46 @@ _lock = threading.RLock()
 _conn: Optional[sqlite3.Connection] = None
 
 _SCHEMA = """
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    expires_at REAL NOT NULL,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS partitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    description TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS partition_members (
+    partition_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    PRIMARY KEY (partition_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS device_partitions (
+    serial TEXT NOT NULL,
+    partition_id INTEGER NOT NULL,
+    PRIMARY KEY (serial, partition_id)
+);
+CREATE TABLE IF NOT EXISTS bookings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    serial TEXT NOT NULL,
+    start_ts REAL NOT NULL,
+    end_ts REAL NOT NULL,
+    note TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
 CREATE TABLE IF NOT EXISTS devices (
     serial TEXT PRIMARY KEY,
     model TEXT DEFAULT '',
@@ -251,3 +291,127 @@ def set_setting(key: str, value: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (key, value),
     )
+
+# ---------- 用户 / 会话 ----------
+
+def create_user(username: str, password_hash: str, salt: str, role: str = "user") -> dict:
+    execute("INSERT INTO users(username, password_hash, salt, role) VALUES(?,?,?,?)",
+            (username, password_hash, salt, role))
+    return query_one("SELECT id, username, role, created_at FROM users WHERE username=?", (username,))
+
+
+def get_user_by_name(username: str) -> Optional[dict]:
+    return query_one("SELECT * FROM users WHERE username=?", (username,))
+
+
+def get_user(user_id: int) -> Optional[dict]:
+    return query_one("SELECT id, username, role, created_at FROM users WHERE id=?", (user_id,))
+
+
+def list_users() -> list[dict]:
+    return query("SELECT id, username, role, created_at FROM users ORDER BY id")
+
+
+def delete_user(user_id: int) -> None:
+    execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+    execute("DELETE FROM partition_members WHERE user_id=?", (user_id,))
+    execute("DELETE FROM bookings WHERE user_id=?", (user_id,))
+    execute("DELETE FROM users WHERE id=?", (user_id,))
+
+
+def create_session(token: str, user_id: int, expires_at: float) -> None:
+    execute("INSERT INTO sessions(token, user_id, expires_at) VALUES(?,?,?)", (token, user_id, expires_at))
+
+
+def get_session(token: str) -> Optional[dict]:
+    return query_one("SELECT * FROM sessions WHERE token=? AND expires_at>?", (token, time.time()))
+
+
+def delete_session(token: str) -> None:
+    execute("DELETE FROM sessions WHERE token=?", (token,))
+
+
+def delete_user_sessions(user_id: int) -> None:
+    execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+
+
+# ---------- 分区 ----------
+
+def create_partition(name: str, description: str = "") -> dict:
+    execute("INSERT OR IGNORE INTO partitions(name, description) VALUES(?,?)", (name, description))
+    return query_one("SELECT * FROM partitions WHERE name=?", (name,))
+
+
+def list_partitions() -> list[dict]:
+    parts = query("SELECT * FROM partitions ORDER BY id")
+    for p in parts:
+        p["members"] = [r["user_id"] for r in query(
+            "SELECT user_id FROM partition_members WHERE partition_id=?", (p["id"],))]
+        p["devices"] = [r["serial"] for r in query(
+            "SELECT serial FROM device_partitions WHERE partition_id=?", (p["id"],))]
+    return parts
+
+
+def delete_partition(partition_id: int) -> None:
+    execute("DELETE FROM partition_members WHERE partition_id=?", (partition_id,))
+    execute("DELETE FROM device_partitions WHERE partition_id=?", (partition_id,))
+    execute("DELETE FROM partitions WHERE id=?", (partition_id,))
+
+
+def set_partition_members(partition_id: int, user_ids: list[int]) -> None:
+    execute("DELETE FROM partition_members WHERE partition_id=?", (partition_id,))
+    for uid in user_ids:
+        execute("INSERT OR IGNORE INTO partition_members(partition_id, user_id) VALUES(?,?)", (partition_id, uid))
+
+
+def set_partition_devices(partition_id: int, serials: list[str]) -> None:
+    execute("DELETE FROM device_partitions WHERE partition_id=?", (partition_id,))
+    for s in serials:
+        execute("INSERT OR IGNORE INTO device_partitions(serial, partition_id) VALUES(?,?)", (s, partition_id))
+
+
+def user_partitions(user_id: int) -> list[int]:
+    return [r["partition_id"] for r in query(
+        "SELECT partition_id FROM partition_members WHERE user_id=?", (user_id,))]
+
+
+def partition_devices(partition_id: int) -> list[str]:
+    return [r["serial"] for r in query(
+        "SELECT serial FROM device_partitions WHERE partition_id=?", (partition_id,))]
+
+
+# ---------- 预约 ----------
+
+def create_booking(user_id: int, serial: str, start_ts: float, end_ts: float, note: str = "") -> dict:
+    execute("INSERT INTO bookings(user_id, serial, start_ts, end_ts, note) VALUES(?,?,?,?,?)",
+            (user_id, serial, start_ts, end_ts, note))
+    return query_one("SELECT * FROM bookings ORDER BY id DESC LIMIT 1", ())
+
+
+def list_bookings(user_id: Optional[int] = None) -> list[dict]:
+    if user_id is None:
+        rows = query("SELECT * FROM bookings ORDER BY start_ts DESC")
+    else:
+        rows = query("SELECT * FROM bookings WHERE user_id=? ORDER BY start_ts DESC", (user_id,))
+    for r in rows:
+        u = get_user(r["user_id"])
+        r["username"] = u["username"] if u else "?"
+    return rows
+
+
+def delete_booking(booking_id: int, user_id: Optional[int] = None) -> None:
+    if user_id is None:
+        execute("DELETE FROM bookings WHERE id=?", (booking_id,))
+    else:
+        execute("DELETE FROM bookings WHERE id=? AND user_id=?", (booking_id, user_id))
+
+
+def active_booking(serial: str, now: Optional[float] = None) -> Optional[dict]:
+    now = now or time.time()
+    row = query_one("SELECT * FROM bookings WHERE serial=? AND start_ts<=? AND end_ts>=? "
+                    "ORDER BY end_ts LIMIT 1", (serial, now, now))
+    if row:
+        u = get_user(row["user_id"])
+        row["username"] = u["username"] if u else "?"
+    return row
+

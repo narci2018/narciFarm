@@ -170,7 +170,7 @@ class Mirror {
       return;
     }
     const q = (this.opts.quality || 'medium');
-    this.ws = new WebSocket(API.wsUrl(`/ws/mirror/${this.serial}?control=1&quality=${q}`));
+    this.ws = new WebSocket(API.wsAuthed(`/ws/mirror/${this.serial}?control=1&quality=${q}`));
     this.ws.binaryType = 'arraybuffer';
     this.ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {

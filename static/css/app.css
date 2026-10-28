@@ -229,3 +229,15 @@ html, body, .mirror-move, .device-list, .group-list, .console-out, .result-box,
 .perf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-top: 8px; }
 .perf-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
 .perf-label { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
+
+/* 登录页 */
+.login-view { position: fixed; inset: 0; background: var(--bg); z-index: 400;
+  display: flex; align-items: center; justify-content: center; }
+.login-view.hidden { display: none; }
+.login-card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+  padding: 34px 38px; width: 340px; display: flex; flex-direction: column; gap: 12px;
+  box-shadow: 0 20px 70px rgba(0,0,0,.4); animation: pop .2s ease-out; }
+.login-logo { font-size: 22px; font-weight: 700; color: var(--acc); text-align: center; }
+.login-sub { color: var(--dim); font-size: 13px; text-align: center; margin-bottom: 6px; }
+.login-card input { padding: 10px 12px; }
+.topuser { display: flex; align-items: center; gap: 8px; margin-right: 10px; }
