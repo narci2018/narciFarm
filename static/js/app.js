@@ -339,6 +339,7 @@ function bindTabs() {
       if (tab.dataset.tab === 'devtools') refreshDevTools();
       if (tab.dataset.tab === 'scenario') loadTemplates();
       if (tab.dataset.tab === 'team') loadTeam();
+      if (tab.dataset.tab === 'stats') loadStats();
       if (tab.dataset.tab === 'overview') loadMyBookings();
       if (tab.dataset.tab === 'schedule') refreshSchedules();
     };
@@ -1305,6 +1306,49 @@ async function editPartition(pid) {
   await API.post(`/api/partitions/${pid}/devices`, { serials: deviceStr.split(',').map(x => x.trim()).filter(Boolean) });
   toast('分区已更新', 'ok');
   loadTeam();
+}
+
+
+
+// ---------- 使用统计 ----------
+
+function fmtDur(sec) {
+  if (!sec) return '0分钟';
+  if (sec < 3600) return Math.round(sec / 60) + '分钟';
+  return (sec / 3600).toFixed(1) + '小时';
+}
+
+async function loadStats() {
+  try {
+    const s = await API.get('/api/usage/summary');
+    const recent = await API.get('/api/usage/recent?limit=30');
+    $('stat-cards').innerHTML = [
+      ['总会话', s.total_sessions], ['总使用时长', fmtDur(s.total_sec)],
+      ['今日会话', s.today_sessions], ['今日时长', fmtDur(s.today_sec)],
+    ].map(([k, v]) => `<div class="stat-card"><div class="stat-num">${v}</div><div class="stat-label">${k}</div></div>`).join('');
+    // 设备排行(横向条)
+    const maxSec = Math.max(...s.per_device.map(d => d.total_sec), 1);
+    $('stat-devices').innerHTML = s.per_device.length ? s.per_device.map(d => {
+      const pct = Math.round(d.total_sec / maxSec * 100);
+      const last = d.last_used ? new Date(d.last_used * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+      return `<div class="bar-row"><span class="bar-name dserial">${esc(d.serial)}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        <span class="bar-val">${fmtDur(d.total_sec)} · ${d.control_count}次操作 · 最近 ${last}${d.top_user ? ' · 主要 ' + esc(d.top_user) : ''}</span></div>`;
+    }).join('') : '<span class="hint">暂无使用记录</span>';
+    // 用户表
+    const tb = $('stat-users').querySelector('tbody');
+    tb.innerHTML = s.per_user.length ? s.per_user.map(u =>
+      `<tr><td>${esc(u.username)}</td><td>${u.role === 'admin' ? '管理员' : '成员'}</td>
+       <td>${u.devices}</td><td>${fmtDur(u.total_sec)}</td>
+       <td class="hint">${u.total_sec ? '使用中' : '—'}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="hint">暂无数据</td></tr>';
+    // 动态
+    $('stat-recent').innerHTML = recent.events.length ? recent.events.map(e => {
+      const t = new Date(e.started_at * 1000).toLocaleString('zh-CN', { hour12: false });
+      const dur = e.duration_sec ? ` · ${fmtDur(e.duration_sec)}` : '';
+      return `<div>[${t}] ${esc(e.username)} → ${esc(e.serial)} (${esc(e.kind || 'mirror')}${dur})</div>`;
+    }).join('') : '<span class="hint">暂无动态</span>';
+  } catch (e) {}
 }
 
 

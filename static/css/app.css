@@ -241,3 +241,14 @@ html, body, .mirror-move, .device-list, .group-list, .console-out, .result-box,
 .login-sub { color: var(--dim); font-size: 13px; text-align: center; margin-bottom: 6px; }
 .login-card input { padding: 10px 12px; }
 .topuser { display: flex; align-items: center; gap: 8px; margin-right: 10px; }
+
+/* 统计 */
+.stat-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.stat-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; text-align: center; }
+.stat-num { font-size: 20px; font-weight: 700; color: var(--acc); }
+.stat-label { font-size: 12px; color: var(--dim); margin-top: 2px; }
+.bar-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.bar-name { width: 150px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { flex: 1; height: 14px; background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.bar-fill { height: 100%; background: linear-gradient(90deg, var(--acc), #7cc4ff); }
+.bar-val { font-size: 11px; color: var(--dim); white-space: nowrap; }

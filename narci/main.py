@@ -376,7 +376,9 @@ async def api_input(serial: str, body: dict, request: Request):
     _booking_guard(serial, request.state.user)
     if db.agent_of(serial):
         r = await _proxy_to_agent(serial, "input", {"action": body.get("action"), "params": body.get("params", {})})
+        db.add_usage_counter(request.state.user["id"], serial, control=1)
         return {"ok": r.get("ok", False), **({"error": r["error"]} if r.get("error") else {})}
+    db.add_usage_counter(request.state.user["id"], serial, control=1)
     try:
         note = await _input_action(serial, body["action"], body.get("params", {}))
     except adb.AdbError as e:
@@ -653,9 +655,13 @@ async def ws_mirror(ws: WebSocket, serial: str):
         await ws.send_json({"type": "error", "msg": "未登录"})
         await ws.close()
         return
+    usage_id = db.start_usage_session(user["id"], user["username"], serial)
     # 远程设备: 中继到所属 Agent 的投屏 WS
     if db.agent_of(serial):
-        await _proxy_mirror(ws, serial, db.agent_of(serial), ws.query_params.get("quality", "medium"))
+        try:
+            await _proxy_mirror(ws, serial, db.agent_of(serial), ws.query_params.get("quality", "medium"))
+        finally:
+            db.end_usage_session(usage_id)
         return
     control = ws.query_params.get("control", "1") != "0"
     quality = ws.query_params.get("quality", "medium")
@@ -713,6 +719,7 @@ async def ws_mirror(ws: WebSocket, serial: str):
         with suppress(Exception):
             await ws.send_json({"type": "error", "msg": f"投屏通道异常: {e}"})
     finally:
+        db.end_usage_session(usage_id)
         hub.unsubscribe(serial, queue)
         writer_task.cancel()
         bus.info(f"[{serial}] 投屏连接关闭")
@@ -1165,6 +1172,18 @@ async def _proxy_mirror(ws: WebSocket, serial: str, agent: dict, quality: str) -
             await ws.send_json({"type": "error", "msg": f"远程投屏失败: {e}"})
         with suppress(Exception):
             await ws.close()
+
+
+
+
+@app.get("/api/usage/summary")
+async def api_usage_summary(_=Depends(_auth.require_user)):
+    return db.usage_summary()
+
+
+@app.get("/api/usage/recent")
+async def api_usage_recent(limit: int = 30, _=Depends(_auth.require_user)):
+    return {"events": db.recent_usage(limit)}
 
 
 @app.get("/metrics")

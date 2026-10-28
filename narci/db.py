@@ -15,6 +15,29 @@ _conn: Optional[sqlite3.Connection] = None
 
 _SCHEMA = """
 
+CREATE TABLE IF NOT EXISTS usage_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    serial TEXT NOT NULL,
+    agent_id TEXT DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'mirror',
+    started_at REAL NOT NULL,
+    ended_at REAL DEFAULT 0,
+    duration_sec INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS usage_counters (
+    user_id INTEGER NOT NULL,
+    serial TEXT NOT NULL,
+    day TEXT NOT NULL,
+    control_count INTEGER DEFAULT 0,
+    mirror_sec INTEGER DEFAULT 0,
+    last_ts REAL DEFAULT 0,
+    PRIMARY KEY (user_id, serial, day)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_serial ON usage_sessions(serial);
+CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_sessions(user_id);
+
 CREATE TABLE IF NOT EXISTS agents (
     agent_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -485,4 +508,81 @@ def agent_of(serial: str) -> Optional[dict]:
     row = query_one("SELECT a.* FROM agents a JOIN remote_devices r ON r.agent_id=a.agent_id "
                     "WHERE r.serial=?", (serial,))
     return row
+
+# ---------- 使用统计 ----------
+
+def start_usage_session(user_id: int, username: str, serial: str, agent_id: str = "",
+                        kind: str = "mirror") -> int:
+    import time
+    execute("INSERT INTO usage_sessions(user_id, username, serial, agent_id, kind, started_at) "
+            "VALUES(?,?,?,?,?,?)", (user_id, username, serial, agent_id, kind, time.time()))
+    return query_one("SELECT id FROM usage_sessions ORDER BY id DESC LIMIT 1", ())["id"]
+
+
+def end_usage_session(session_id: int) -> None:
+    import time
+    row = query_one("SELECT * FROM usage_sessions WHERE id=?", (session_id,))
+    if not row or row["ended_at"]:
+        return
+    dur = max(0, int(time.time() - row["started_at"]))
+    execute("UPDATE usage_sessions SET ended_at=?, duration_sec=? WHERE id=?",
+            (time.time(), dur, session_id))
+    # 同步到按天聚合
+    add_usage_counter(row["user_id"], row["serial"], int(dur))
+
+
+def add_usage_counter(user_id: int, serial: str, mirror_sec: int = 0, control: int = 0) -> None:
+    import time
+    day = time.strftime("%Y-%m-%d")
+    execute("INSERT INTO usage_counters(user_id, serial, day, control_count, mirror_sec, last_ts) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(user_id, serial, day) DO UPDATE SET "
+            "control_count=control_count+excluded.control_count, "
+            "mirror_sec=mirror_sec+excluded.mirror_sec, last_ts=excluded.last_ts",
+            (user_id, serial, day, control, mirror_sec, time.time()))
+
+
+def usage_summary() -> dict:
+    """设备利用率 + 用户使用 + 总览。"""
+    # 合并本地+远程设备, 按序列号去重(本地优先)
+    seen = {}
+    for row in query("SELECT serial, model FROM devices UNION ALL SELECT serial, model FROM remote_devices"):
+        if row["serial"] not in seen:
+            seen[row["serial"]] = row["model"]
+    serials = list(seen.keys())
+    per_device = []
+    for s in serials:
+        row = query_one("SELECT COUNT(*) AS sessions, COALESCE(SUM(duration_sec),0) AS total_sec "
+                        "FROM usage_sessions WHERE serial=?", (s,))
+        cnt = query_one("SELECT COALESCE(SUM(control_count),0) AS c FROM usage_counters WHERE serial=?", (s,))
+        last = query_one("SELECT MAX(started_at) AS last FROM usage_sessions WHERE serial=?", (s,))
+        who = query_one("SELECT username, COUNT(*) AS n FROM usage_sessions WHERE serial=? "
+                        "GROUP BY username ORDER BY n DESC LIMIT 1", (s,))
+        per_device.append({"serial": s, "sessions": row["sessions"] or 0,
+                           "total_sec": row["total_sec"] or 0,
+                           "control_count": cnt["c"] or 0,
+                           "last_used": last["last"] or 0,
+                           "top_user": who["username"] if who else ""})
+    per_device.sort(key=lambda d: -d["total_sec"])
+    users = []
+    for u in query("SELECT id, username, role FROM users"):
+        row = query_one("SELECT COUNT(DISTINCT serial) AS devs, COALESCE(SUM(duration_sec),0) AS sec "
+                        "FROM usage_sessions WHERE user_id=?", (u["id"],))
+        users.append({"username": u["username"], "role": u["role"],
+                      "devices": row["devs"] or 0, "total_sec": row["sec"] or 0})
+    users.sort(key=lambda x: -x["total_sec"])
+    totals = query_one("SELECT COUNT(*) AS sessions, COALESCE(SUM(duration_sec),0) AS sec "
+                       "FROM usage_sessions", ())
+    today = query_one("SELECT COUNT(*) AS n FROM usage_sessions WHERE started_at>=?",
+                      (time.time() - 86400,)) if False else None
+    import time as _t
+    today = query_one("SELECT COUNT(*) AS sessions, COALESCE(SUM(duration_sec),0) AS sec "
+                      "FROM usage_sessions WHERE started_at>=?", (_t.time() - 86400,))
+    return {"per_device": per_device, "per_user": users,
+            "total_sessions": totals["sessions"] or 0, "total_sec": totals["sec"] or 0,
+            "today_sessions": today["sessions"] or 0, "today_sec": today["sec"] or 0}
+
+
+def recent_usage(limit: int = 30) -> list[dict]:
+    rows = query("SELECT * FROM usage_sessions ORDER BY started_at DESC LIMIT ?", (limit,))
+    return [{**r, "started_at": r["started_at"]} for r in rows]
 
