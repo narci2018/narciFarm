@@ -22,7 +22,55 @@ def next_run_for(kind: str, value: str, now: Optional[float] = None) -> float:
         if target.timestamp() <= now:
             target += datetime.timedelta(days=1)
         return target.timestamp()
+    if kind == "cron":
+        return _next_cron(value, now)
     raise ValueError(f"未知调度类型: {kind}")
+
+
+def _parse_cron_field(field: str, lo: int, hi: int) -> list[int]:
+    """解析单个 cron 字段: 支持 * / *\/n / a-b / a,b / 数字。"""
+    values = set()
+    for part in field.split(","):
+        part = part.strip()
+        step = 1
+        if "/" in part:
+            part, _, step_s = part.partition("/")
+            step = max(int(step_s), 1)
+        if part == "*":
+            start, end = lo, hi
+        elif "-" in part:
+            start, _, end_s = part.partition("-")
+            start, end = int(start), int(end_s)
+        else:
+            start = end = int(part)
+        values.update(range(max(start, lo), min(end, hi) + 1, step))
+    return sorted(values)
+
+
+def _next_cron(expr: str, now: float) -> float:
+    """5 段 cron(分 时 日 月 周), 返回下次触发时间戳。周字段 0/7 均视为周日。"""
+    import datetime
+    parts = expr.split()
+    if len(parts) != 5:
+        raise ValueError("cron 需要 5 段: 分 时 日 月 周")
+    minutes = _parse_cron_field(parts[0], 0, 59)
+    hours = _parse_cron_field(parts[1], 0, 23)
+    doms = _parse_cron_field(parts[2], 1, 31)
+    months = _parse_cron_field(parts[3], 1, 12)
+    dows = {0 if v == 7 else v for v in _parse_cron_field(parts[4], 0, 7)}
+
+    d = datetime.datetime.fromtimestamp(now) + datetime.timedelta(minutes=1)
+    d = d.replace(second=0, microsecond=0)
+    for _ in range(366 * 24 * 60):  # 最多找一年
+        if d.month in months and d.minute in minutes and d.hour in hours:
+            dom_ok = d.day in doms
+            dow = (d.weekday() + 1) % 7  # 转 0=周日
+            dow_ok = dow in dows
+            # 标准 cron: 日与周同时指定时取并集(任一匹配)
+            if (dom_ok or dow_ok) if (parts[2] != "*" and parts[4] != "*") else (dom_ok and dow_ok):
+                return d.timestamp()
+        d += datetime.timedelta(minutes=1)
+    raise ValueError("cron 表达式一年内无触发时间")
 
 
 def _targets_of(schedule: dict) -> list[str]:

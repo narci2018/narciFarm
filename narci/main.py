@@ -18,8 +18,9 @@ from .config import (CAPTURES_DIR, DEVICE_REFRESH_INTERVAL, HOST, MAX_FPS,
                      UPLOADS_DIR, VIDEO_BITRATE)
 from .events import bus
 from .scrcpy_client import ScrcpyClient, ScrcpyClientError, ensure_jar_pushed, hub
-from .scrcpy_protocol import encode_set_clipboard
+from .scrcpy_protocol import encode_set_clipboard, encode_set_display_power
 
+_START_TIME = time.time()
 _wm_size_cache: dict[str, tuple[float, tuple[int, int]]] = {}
 _info_fetch_at: dict[str, float] = {}
 _wifi_retry_at: dict[str, float] = {}
@@ -228,6 +229,22 @@ async def api_scan_lan(body: dict = None):
 async def api_refresh():
     n = await refresh_devices()
     return {"online": n}
+
+
+@app.put("/api/devices/{serial}")
+async def api_update_device(serial: str, body: dict):
+    db.update_device(serial, **{k: v for k, v in body.items() if k in ("notes", "disabled", "group_id")})
+    return db.get_device(serial)
+
+
+@app.get("/api/devices/{serial}/stream_stats")
+async def api_stream_stats(serial: str):
+    client = hub.get(serial)
+    if not client:
+        return {"active": False}
+    return {"active": True, "fps": round(client.fps(), 1), "frames": client.frames,
+            "width": client.width, "height": client.height,
+            "dropped_clients": len(hub._subscribers.get(serial, ()))}
 
 
 # ---------- 应用管理 ----------
@@ -564,8 +581,14 @@ async def ws_events(ws: WebSocket):
 async def ws_mirror(ws: WebSocket, serial: str):
     await ws.accept()
     control = ws.query_params.get("control", "1") != "0"
+    quality = ws.query_params.get("quality", "medium")
+    presets = {
+        "high": {"max_size": 1280, "video_bit_rate": 8000000, "max_fps": 30},
+        "medium": {"max_size": 960, "video_bit_rate": 4000000, "max_fps": 30},
+        "low": {"max_size": 640, "video_bit_rate": 2000000, "max_fps": 24},
+    }
     try:
-        client = await hub.acquire(serial, control=control)
+        client = await hub.acquire(serial, control=control, **presets.get(quality, presets["medium"]))
     except Exception as e:  # noqa: BLE001 - 任何连接失败都必须可见：写日志 + 回前端错误帧
         bus.error(f"[{serial}] 投屏连接失败: {type(e).__name__}: {e}")
         with suppress(Exception):
@@ -643,6 +666,13 @@ async def _handle_ws_command(ws: WebSocket, client: ScrcpyClient, data: dict) ->
                             "frames": client.frames, "width": client.width, "height": client.height})
         return
 
+    if action == "screen_power":
+        # 息屏/亮屏(scrcpy 控制通道 SET_DISPLAY_POWER)
+        if client.control_enabled and client.running:
+            await client.send_control(encode_set_display_power(bool(data.get("on", True))))
+            bus.info(f"[{client.serial}] 注入[scrcpy] screen_power on={bool(data.get('on', True))}")
+        return
+
     if action == "set_clipboard":
         if client.control_enabled and client.running:
             await client.send_control(encode_set_clipboard(str(data.get("text", "")), paste=bool(data.get("paste"))))
@@ -694,6 +724,36 @@ async def api_shutdown():
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
+
+
+@app.get("/metrics")
+async def api_metrics():
+    """Prometheus 指标(text/plain)。"""
+    rows = db.list_devices()
+    online = sum(1 for r in rows if r["last_seen"] and (time.time() - _last_seen_ts(r)) < 15)
+    active_streams = len(hub._clients)
+    lines = [
+        "# HELP narcifarm_devices_total 注册设备总数",
+        "# TYPE narcifarm_devices_total gauge",
+        f"narcifarm_devices_total {len(rows)}",
+        "# HELP narcifarm_devices_online 当前在线设备数",
+        "# TYPE narcifarm_devices_online gauge",
+        f"narcifarm_devices_online {online}",
+        "# HELP narcifarm_streams_active 活跃投屏会话数",
+        "# TYPE narcifarm_streams_active gauge",
+        f"narcifarm_streams_active {active_streams}",
+        "# HELP narcifarm_uptime_seconds 服务运行时长(秒)",
+        "# TYPE narcifarm_uptime_seconds counter",
+        f"narcifarm_uptime_seconds {int(time.time() - _START_TIME)}",
+    ]
+    return Response(chr(10).join(lines) + chr(10), media_type="text/plain; version=0.0.4")
+
+
+def _last_seen_ts(row: dict) -> float:
+    try:
+        return time.mktime(time.strptime(row["last_seen"], "%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return 0.0
 
 
 @app.get("/")

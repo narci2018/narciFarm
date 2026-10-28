@@ -169,7 +169,8 @@ class Mirror {
       this._startFallback('浏览器不支持 WebCodecs');
       return;
     }
-    this.ws = new WebSocket(API.wsUrl(`/ws/mirror/${this.serial}?control=1`));
+    const q = (this.opts.quality || 'medium');
+    this.ws = new WebSocket(API.wsUrl(`/ws/mirror/${this.serial}?control=1&quality=${q}`));
     this.ws.binaryType = 'arraybuffer';
     this.ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {

@@ -194,8 +194,9 @@
         </div>
         <div class="form-row">
           <label>类型</label>
-          <select id="sd-kind"><option value="interval">间隔（秒，跑完再等 N 秒）</option><option value="daily">每天 HH:MM</option></select>
-          <label>值</label><input id="sd-value" placeholder="3600 或 09:30">
+          <select id="sd-kind"><option value="interval">间隔（秒，跑完再等 N 秒）</option><option value="daily">每天 HH:MM</option><option value="cron">cron 表达式(分 时 日 月 周)</option></select>
+          <label>值</label><input id="sd-value" placeholder="3600 或 09:30 或 */5 * * * *">
+          <span class="hint" id="sd-hint">间隔秒 / 每天 HH:MM / cron 分 时 日 月 周</span>
           <label class="chk"><input type="checkbox" id="sd-enabled" checked> 启用</label>
           <button id="sd-add" class="btn primary">添加调度</button>
         </div>
@@ -251,6 +252,11 @@
   <div class="mirror-bar">
     <span id="mm-title">投屏</span>
     <span id="mm-mode" class="hint">连接中…</span>
+    <select id="mm-quality" title="投屏画质(重开投屏生效)" style="width:auto">
+      <option value="high">高画质</option>
+      <option value="medium" selected>均衡</option>
+      <option value="low">流畅</option>
+    </select>
     <span id="mm-fps" class="hint"></span>
     <label class="chk"><input type="checkbox" id="mm-broadcast"> 广播到选中设备</label>
     <label class="chk"><input type="checkbox" id="mm-record"> 录制动作</label>
@@ -269,6 +275,8 @@
   </div>
   <div class="mirror-subbar">
     <button class="btn small" data-key="wake">唤醒</button>
+    <button class="btn small" id="mm-screen-on" title="点亮屏幕">亮屏</button>
+    <button class="btn small" id="mm-screen-off" title="熄灭屏幕">熄屏</button>
     <button class="btn small" data-key="back">返回</button>
     <button class="btn small" data-key="home">HOME</button>
     <button class="btn small" data-key="menu">菜单</button>
@@ -295,6 +303,20 @@
   <span id="mm-pill-fps" class="hint"></span>
   <button id="mm-pill-restore" class="btn small">还原</button>
 </div>
+
+</div>
+
+<div id="prompt-modal" class="confirm-modal hidden">
+  <div class="confirm-panel">
+    <div class="confirm-title" id="prompt-title">输入</div>
+    <div class="confirm-msg" id="prompt-msg"></div>
+    <input id="prompt-input" style="width:100%">
+    <div class="confirm-actions">
+      <button class="btn" id="prompt-cancel">取消</button>
+      <button class="btn primary" id="prompt-ok">确定</button>
+    </div>
+  </div>
+
 
 <div id="toasts" class="toasts"></div>
 

@@ -67,6 +67,7 @@ async function init() {
   setInterval(() => refreshDevices(true), 3000);
   setInterval(refreshRuns, 5000);
   setInterval(snapshotTicker, 1000);
+  setInterval(pollStreamStats, 3000);
 }
 
 // ---------- 事件流 ----------
@@ -110,11 +111,25 @@ function renderDeviceList() {
     li.innerHTML = `
       <input type="checkbox" ${State.selected.has(d.serial) ? 'checked' : ''}>
       <span class="dstate ${d.state}"></span>
-      <span class="dserial" title="${esc(d.serial)}">${esc(d.serial)}</span>
-      <span class="dmodel">${esc(d.model || d.android_version || '')}</span>`;
+      <span class="dserial" title="${esc(d.serial)}${d.notes ? ' · ' + esc(d.notes) : ''}">${esc(d.serial)}</span>
+      <span class="dmodel">${esc(d.model || d.android_version || '')}</span>
+      ${d.notes ? `<span class="dnote">${esc(d.notes)}</span>` : ''}`;
     li.querySelector('input').onchange = (e) => {
       if (e.target.checked) State.selected.add(d.serial); else State.selected.delete(d.serial);
     };
+    const noteBtn = document.createElement('button');
+    noteBtn.className = 'btn small';
+    noteBtn.textContent = '✎';
+    noteBtn.title = '编辑备注';
+    noteBtn.onclick = async (e) => {
+      e.stopPropagation();
+      const v = await showPrompt({ title: '设备备注', message: d.serial, defaultValue: d.notes || '' });
+      if (v === null) return;
+      await API.put(`/api/devices/${encodeURIComponent(d.serial)}`, { notes: v });
+      toast('备注已保存', 'ok');
+      refreshDevices(true);
+    };
+    li.appendChild(noteBtn);
     ul.appendChild(li);
   }
 }
@@ -141,6 +156,26 @@ function renderDeviceGrid() {
     existing.delete(d.serial);
   }
   existing.forEach(c => c.remove());
+}
+
+async function pollStreamStats() {
+  for (const d of State.devices) {
+    if (d.state !== 'device') continue;
+    const card = document.querySelector(`.device-card[data-serial="${CSS.escape(d.serial)}"]`);
+    if (!card) continue;
+    let badge = card.querySelector('.fps-badge');
+    try {
+      const st = await API.get(`/api/devices/${encodeURIComponent(d.serial)}/stream_stats`);
+      if (st.active) {
+        if (!badge) {
+          badge = document.createElement('span');
+          badge.className = 'fps-badge';
+          card.querySelector('.meta').appendChild(badge);
+        }
+        badge.textContent = `▶ ${st.fps}fps`;
+      } else if (badge) badge.remove();
+    } catch (e) { if (badge) badge.remove(); }
+  }
 }
 
 function snapshotTicker() {
@@ -468,6 +503,10 @@ async function refreshSchedules() {
 }
 
 function bindSchedule() {
+  $('sd-kind').onchange = () => {
+    const k = $('sd-kind').value;
+    $('sd-value').placeholder = k === 'cron' ? '*/5 * * * *' : (k === 'daily' ? '09:30' : '3600');
+  };
   $('sd-add').onclick = async () => {
     const scenarioId = parseInt($('sd-scenario').value);
     if (!scenarioId) return toast('请先创建场景', 'error');
@@ -602,7 +641,10 @@ function openMirror(serial, opts = {}) {
   };
   const recording = () => $('mm-record').checked;
 
+  const quality = $('mm-quality').value || localStorage.getItem(`narciFarm.quality.${serial}`) || 'medium';
+  localStorage.setItem(`narciFarm.quality.${serial}`, quality);
   State.mirror = new Mirror(serial, canvas, {
+    quality,
     getTargets,
     recording,
     onGesture: (step) => {
@@ -689,6 +731,25 @@ function openMirror(serial, opts = {}) {
   });
   document.addEventListener('mouseup', () => { winDrag = null; });
 
+  // ===== 拖拽 APK 到投屏窗口直接安装 =====
+  const dropTarget = $('mirror-modal');
+  dropTarget.addEventListener('dragover', (e) => { e.preventDefault(); dropTarget.classList.add('drop-hint'); });
+  dropTarget.addEventListener('dragleave', () => dropTarget.classList.remove('drop-hint'));
+  dropTarget.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dropTarget.classList.remove('drop-hint');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f) return;
+    if (!f.name.toLowerCase().endsWith('.apk')) return toast('仅支持拖入 APK 文件', 'error');
+    const fd = new FormData();
+    fd.append('apk', f);
+    toast(`正在安装 ${f.name} …`, 'info');
+    try {
+      const r = await API.post(`/api/devices/${encodeURIComponent(serial)}/install`, fd);
+      toast(`安装完成: ${(r.out || 'OK').trim()}`, 'ok', 6000);
+    } catch (err) { toast(`安装失败: ${err.message}`, 'error', 6000); }
+  });
+
   // ===== 其余工具条绑定（含关闭/加载遮罩收口） =====
   const closeMirror = () => {
     hideLoading();
@@ -697,6 +758,9 @@ function openMirror(serial, opts = {}) {
     $('mirror-modal').classList.add('hidden');
   };
   $('mm-close').onclick = closeMirror;
+  $('mm-quality').onchange = () => localStorage.setItem(`narciFarm.quality.${serial}`, $('mm-quality').value);
+  $('mm-screen-on').onclick = () => State.mirror && State.mirror.send({ action: 'screen_power', on: true });
+  $('mm-screen-off').onclick = () => State.mirror && State.mirror.send({ action: 'screen_power', on: false });
 
   // ===== 窗口控制: 最小化 / 最大化 =====
   const pill = $('mm-minimized-pill');
@@ -816,6 +880,27 @@ function showConfirm(opts) {
     $('confirm-ok').onclick = () => done(true);
     $('confirm-cancel').onclick = () => done(false);
     modal.onclick = (e) => { if (e.target === modal) done(false); };
+  });
+}
+
+
+/* ---------- 输入对话框 ---------- */
+function showPrompt(opts) {
+  const { title = '输入', message = '', defaultValue = '', okText = '确定' } = opts || {};
+  return new Promise((resolve) => {
+    const modal = $('prompt-modal');
+    $('prompt-title').textContent = title;
+    $('prompt-msg').textContent = message;
+    $('prompt-ok').textContent = okText;
+    const inp = $('prompt-input');
+    inp.value = defaultValue || '';
+    modal.classList.remove('hidden');
+    inp.focus();
+    const done = (v) => { modal.classList.add('hidden'); resolve(v); };
+    $('prompt-ok').onclick = () => done(inp.value);
+    $('prompt-cancel').onclick = () => done(null);
+    inp.onkeydown = (e) => { if (e.key === 'Enter') done(inp.value); };
+    modal.onclick = (e) => { if (e.target === modal) done(null); };
   });
 }
 
