@@ -3,6 +3,8 @@
 每个在线设备的投屏会话对应一个 ScrcpyClient 实例，由 StreamHub 管理引用计数。
 """
 import asyncio
+from contextlib import suppress
+from collections import deque
 import random
 import socket
 import struct
@@ -202,6 +204,8 @@ class ScrcpyClient:
         breakdown = " ".join(f"{k}={v * 1000:.0f}ms" for k, v in marks.items())
         bus.info(f"[{self.serial}] 投屏启动耗时: {breakdown} | 总计={total * 1000:.0f}ms "
                   f"(scid={self._scid:08x}, name={self.device_name!r})")
+        # 自动唤醒: 熄屏时投屏画面是黑内容, 唤醒后用户可看到锁屏并解锁(后台执行不阻塞)
+        asyncio.create_task(adb.input_keyevent(self.serial, 224))
 
     async def stop(self, reason: str = "手动停止") -> None:
         if self._closing:
@@ -226,6 +230,7 @@ class ScrcpyClient:
         self._tasks.clear()
         bus.info(f"[{self.serial}] 投屏会话关闭: {reason}")
         if self.on_closed:
+            # on_closed 无锁且带身份守卫, 同步调用即可(不会与 acquire 死锁)
             try:
                 await self.on_closed(reason)
             except Exception:
@@ -345,6 +350,7 @@ class StreamHub:
         self._refs: dict[str, int] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._subscribers: dict[str, set] = {}
+        self._replay: dict[str, deque] = {}  # 无订阅者期间的关键项(配置/会话), 订阅时补发
 
     def _lock(self, serial: str) -> asyncio.Lock:
         if serial not in self._locks:
@@ -358,9 +364,21 @@ class StreamHub:
         return self._refs.get(serial, 0)
 
     def subscribe(self, serial: str) -> asyncio.Queue:
-        """注册一个观看者队列；客户端回调会把会话/帧数据扇出到所有队列。"""
+        """注册观看者; 补发启动早期(订阅建立前)到达的关键项(配置包/会话包),
+        否则首个观看者会丢失 SPS/PPS 配置导致黑屏。"""
         q: asyncio.Queue = asyncio.Queue(maxsize=240)
         self._subscribers.setdefault(serial, set()).add(q)
+        for item in self._replay.pop(serial, ()):
+            try:
+                q.put_nowait(item)
+            except asyncio.QueueFull:
+                pass
+        # 复用已有会话: 补发该客户端最近一次配置, 否则新观看者永远无法初始化解码器
+        cur = self._clients.get(serial)
+        cfg = getattr(cur, "_last_config", None)
+        if cfg is not None:
+            with suppress(asyncio.QueueFull):
+                q.put_nowait(("bin", bytes([3]) + cfg))
         return q
 
     def unsubscribe(self, serial: str, q: asyncio.Queue) -> None:
@@ -383,7 +401,11 @@ class StreamHub:
             client = ScrcpyClient(serial, **kwargs)
 
             def _fanout(item: tuple) -> None:
-                for q in list(self._subscribers.get(serial, ())):
+                qs = list(self._subscribers.get(serial, ()))
+                if not qs:
+                    # 订阅尚未建立(客户端刚启动): 缓存关键项, 订阅时补发
+                    self._replay.setdefault(serial, deque(maxlen=6)).append(item)
+                for q in qs:
                     try:
                         q.put_nowait(item)
                     except asyncio.QueueFull:
@@ -401,6 +423,7 @@ class StreamHub:
                 _fanout(("json", {"type": "session", "width": w, "height": h}))
 
             async def _on_config(payload: bytes) -> None:
+                client._last_config = payload  # 复用会话时新观看者也能拿到配置
                 _fanout(("bin", b"\x03" + payload))
 
             async def _on_frame(pts: int, key_frame: bool, payload: bytes) -> None:
@@ -411,10 +434,11 @@ class StreamHub:
             client.on_frame = _on_frame
 
             async def _closed(reason: str) -> None:
-                async with self._lock(serial):
-                    if self._clients.get(serial) is client:
-                        self._clients.pop(serial, None)
-                        self._refs.pop(serial, None)
+                # 无锁 + 身份守卫: 只清理"还是自己"的会话, 绝不误伤已建立的新会话
+                if self._clients.get(serial) is client:
+                    self._clients.pop(serial, None)
+                    self._refs.pop(serial, None)
+                    self._replay.pop(serial, None)
                     for q in list(self._subscribers.pop(serial, ())):
                         try:
                             q.put_nowait(("json", {"type": "error", "msg": f"投屏会话结束: {reason}"}))
@@ -433,10 +457,12 @@ class StreamHub:
             if n <= 0:
                 client = self._clients.pop(serial, None)
                 self._refs.pop(serial, None)
-                if client:
-                    await client.stop("无观看者")
             else:
                 self._refs[serial] = n
+                client = None
+        # 锁外调用 stop: stop 内部的 on_closed 不再持锁, 避免与 acquire 死锁
+        if client is not None:
+            await client.stop("无观看者")
 
     async def stop_all(self) -> None:
         for serial in list(self._clients):

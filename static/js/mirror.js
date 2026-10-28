@@ -26,6 +26,57 @@ function ELAPSED_LOG(elapsed_ms) {
   console.log('[镜像加载耗时] ' + s);
 }
 
+function annexbToAvcc(payload) {
+  // 部分设备(如本例红米)的帧负载是 Annex-B(起始码), WebCodecs avcC 描述需要 AVCC(长度前缀)
+  const nals = [];
+  let start = -1;
+  for (let p = 0; p < payload.length; p++) {
+    if (payload[p] === 0 && payload[p+1] === 0 && payload[p+2] === 1) {
+      if (start !== -1) nals.push(payload.subarray(start, p));
+      start = p + 3; p += 2;
+    } else if (payload[p] === 0 && payload[p+1] === 0 && payload[p+2] === 0 && payload[p+3] === 1) {
+      if (start !== -1) nals.push(payload.subarray(start, p));
+      start = p + 4; p += 3;
+    }
+  }
+  if (start !== -1) nals.push(payload.subarray(start));
+  let total = 0;
+  for (const n of nals) total += 4 + n.length;
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const n of nals) {
+    out[o++] = (n.length >>> 24) & 0xFF; out[o++] = (n.length >>> 16) & 0xFF;
+    out[o++] = (n.length >>> 8) & 0xFF; out[o++] = n.length & 0xFF;
+    out.set(n, o); o += n.length;
+  }
+  return out;
+}
+
+function toAvccIfNeeded(payload) {
+  if (payload.length < 5) return payload;
+  const b = payload;
+  const isAnnexB = (b[0] === 0 && b[1] === 0 && b[2] === 1) ||
+                   (b[0] === 0 && b[1] === 0 && b[2] === 0 && b[3] === 1);
+  return isAnnexB ? annexbToAvcc(payload) : payload;
+}
+
+function splitAnnexB(payload) {
+  // 按起始码 00 00 01 / 00 00 00 01 切分(部分设备的 SPS/PPS 配置包是 Annex-B 格式)
+  const nals = [];
+  let start = -1;
+  for (let p = 0; p < payload.byteLength; p++) {
+    if (payload[p] === 0 && payload[p+1] === 0 && payload[p+2] === 1) {
+      if (start !== -1) nals.push(payload.subarray(start, p));
+      start = p + 3; p += 2;
+    } else if (payload[p] === 0 && payload[p+1] === 0 && payload[p+2] === 0 && payload[p+3] === 1) {
+      if (start !== -1) nals.push(payload.subarray(start, p));
+      start = p + 4; p += 3;
+    }
+  }
+  if (start !== -1) nals.push(payload.subarray(start));
+  return nals;
+}
+
 function splitAvcc(payload) {
   const nals = [];
   const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
@@ -174,40 +225,56 @@ class Mirror {
       return;
     }
     if (t !== 1) return;
-    if (!this.configured || !this.decoder || this.decoder.state !== 'configured') {
-      this.dropped++; return;
-    }
     const dv = new DataView(buf);
     const key = dv.getUint8(1);
     const pts = Number(dv.getBigUint64(2));
     const payload = u8.subarray(10);
+    // 兜底: 首个关键帧内联 SPS/PPS 时(部分编码器不单独发配置包), 从中提取并配置解码器
+    if (!this.configured && key) {
+      this._configure(payload);
+    }
+    if (!this.configured || !this.decoder || this.decoder.state !== 'configured') {
+      this.dropped++; return;
+    }
     // 解码积压时跳非关键帧（保证画面延迟有界）
     if (this.decoder.decodeQueueSize > 12 && !key) {
       this.dropped++;
       return;
     }
+    const chunkData = toAvccIfNeeded(payload);
     try {
       this.decoder.decode(new EncodedVideoChunk({
-        type: key ? 'key' : 'delta', timestamp: pts, data: payload,
+        type: key ? 'key' : 'delta', timestamp: pts, data: chunkData,
       }));
     } catch (e) {
+      if (!this._errLogged) {
+        this._errLogged = true;
+        console.warn('[narci] 解码异常:', String(e), '| key=', key, 'pts=', pts, 'len=', payload.length);
+      }
       this.dropped++;
     }
   }
 
   _configure(payload) {
-    const nals = splitAvcc(payload);
-    const sps = nals.find(n => (n[0] & 0x1f) === 7);
-    const pps = nals.find(n => (n[0] & 0x1f) === 8);
+    let nals = splitAvcc(payload);
+    let sps = nals.find(n => (n[0] & 0x1f) === 7);
+    let pps = nals.find(n => (n[0] & 0x1f) === 8);
+    if (!sps || !pps) {           // AVCC 里找不到 → 尝试 Annex-B(部分设备配置包格式)
+      nals = splitAnnexB(payload);
+      sps = nals.find(n => (n[0] & 0x1f) === 7);
+      pps = nals.find(n => (n[0] & 0x1f) === 8);
+    }
     if (!sps || !pps) return;
     const codec = 'avc1.' + [...sps.slice(1, 4)].map(b => b.toString(16).padStart(2, '0')).join('');
     if (this.decoder) { try { this.decoder.close(); } catch (e) {} }
     this.configured = false;
     try {
+      // WebCodecs: 构造函数只接受 init; 配置必须通过 configure() 单独调用
       this.decoder = new VideoDecoder({
         output: (vf) => this._draw(vf),
         error: (e) => { console.warn('decoder error', e); this._startFallback('解码失败: ' + e.message); },
-      }, { codec, description: buildAvcC(sps, pps), optimizeForLatency: true });
+      });
+      this.decoder.configure({ codec, description: buildAvcC(sps, pps), optimizeForLatency: true });
       this.configured = true;
     } catch (e) {
       this._startFallback('解码配置失败: ' + e.message);
