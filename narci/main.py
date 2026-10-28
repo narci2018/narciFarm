@@ -1186,6 +1186,37 @@ async def api_usage_recent(limit: int = 30, _=Depends(_auth.require_user)):
     return {"events": db.recent_usage(limit)}
 
 
+
+
+@app.get("/api/usage/export.csv")
+async def api_usage_export_csv(_=Depends(_auth.require_user)):
+    """使用统计导出 CSV(设备明细 + 用户明细)。"""
+    import csv
+    import io
+    s = db.usage_summary()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["类型", "名称", "会话数", "使用时长(秒)", "操作次数", "最近使用", "主要使用人"])
+    for d in s["per_device"]:
+        last = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(d["last_used"])) if d["last_used"] else ""
+        w.writerow(["设备", d["serial"], d["sessions"], d["total_sec"], d["control_count"], last, d["top_user"]])
+    for u in s["per_user"]:
+        w.writerow(["用户", u["username"], "", u["total_sec"], "", "", ""])
+    w.writerow([])
+    w.writerow(["总览", "总会话", s["total_sessions"], "总时长(秒)", s["total_sec"],
+                "今日会话", s["today_sessions"], "今日时长(秒)", s["today_sec"]])
+    data = buf.getvalue().encode("utf-8-sig")  # BOM 便于 Excel 识别中文
+    return Response(content=data, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="narciFarm_usage.csv"'})
+
+
+@app.get("/api/usage/print")
+async def api_usage_print(_=Depends(_auth.require_user)):
+    """打印友好的报表数据(前端渲染后 window.print() 导出 PDF)。"""
+    s = db.usage_summary()
+    return {"summary": s, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+
 @app.get("/metrics")
 async def api_metrics():
     """Prometheus 指标(text/plain)。"""

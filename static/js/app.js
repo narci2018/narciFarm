@@ -1319,6 +1319,19 @@ function fmtDur(sec) {
 }
 
 async function loadStats() {
+  const bar = $('stat-actions');
+  if (bar && !bar.innerHTML) {
+    bar.innerHTML = '<button class="btn small" id="stat-csv">导出 CSV</button>' +
+      '<button class="btn small" id="stat-print">打印报表(PDF)</button>';
+    $('stat-csv').onclick = () => {
+      const a = document.createElement('a');
+      a.href = '/api/usage/export.csv?token=' + encodeURIComponent(AuthToken.get() || '');
+      a.download = '';
+      a.click();
+    };
+    $('stat-print').onclick = () => { document.body.classList.add('printing'); window.print(); };
+    window.onafterprint = () => document.body.classList.remove('printing');
+  }
   try {
     const s = await API.get('/api/usage/summary');
     const recent = await API.get('/api/usage/recent?limit=30');

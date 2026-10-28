@@ -252,3 +252,16 @@ html, body, .mirror-move, .device-list, .group-list, .console-out, .result-box,
 .bar-track { flex: 1; height: 14px; background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
 .bar-fill { height: 100%; background: linear-gradient(90deg, var(--acc), #7cc4ff); }
 .bar-val { font-size: 11px; color: var(--dim); white-space: nowrap; }
+
+/* 打印报表: 隐藏应用框架, 只输出统计内容 */
+@media print {
+  body.printing .topbar, body.printing .sidebar, body.printing .tabs,
+  body.printing .topuser, body.printing #stat-actions, body.printing .toasts,
+  body.printing #mirror-modal, body.printing #login-view { display: none !important; }
+  body.printing .layout { display: block; }
+  body.printing .content { padding: 0; }
+  body.printing .pane-card { border: none; box-shadow: none; }
+  body.printing .bar-track { background: #eee; }
+  body.printing .bar-fill { background: #2563eb; }
+  body { background: #fff; }
+}
