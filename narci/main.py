@@ -489,7 +489,7 @@ async def api_run_scenario(scenario_id: int, body: dict):
         raise HTTPException(400, "目标设备均不在线")
     steps = json.loads(sc["steps"])
     repeat = int(body.get("repeat_count") or sc.get("repeat_count") or 1)
-    run_id = await scenario.start_run(steps, repeat, targets)
+    run_id = await scenario.start_run(steps, repeat, targets, body.get("vars"))
     return {"run_id": run_id, "targets": targets}
 
 
@@ -792,6 +792,39 @@ async def api_metrics(serial: str):
 @app.post("/api/devices/{serial}/startup_time")
 async def api_startup_time(serial: str, body: dict):
     return await adb.startup_time(serial, body.get("package", ""), cold=bool(body.get("cold", True)))
+
+
+
+
+# ---------- 图像模板管理 ----------
+
+@app.get("/api/templates")
+async def api_templates():
+    from . import vision
+    return {"templates": vision.list_templates(), "ocr_available": vision.ocr_available()}
+
+
+@app.post("/api/templates/upload")
+async def api_template_upload(file: UploadFile = File(...)):
+    from . import vision
+    data = await file.read()
+    p = vision.save_template(file.filename, data)
+    return {"ok": True, "name": p.name}
+
+
+@app.delete("/api/templates/{name}")
+async def api_template_delete(name: str):
+    from . import vision
+    return {"ok": vision.delete_template(name)}
+
+
+@app.get("/api/templates/{name}/preview")
+async def api_template_preview(name: str):
+    from . import vision
+    p = vision.TEMPLATES_DIR / name
+    if not p.exists():
+        raise HTTPException(404, "模板不存在")
+    return FileResponse(str(p))
 
 
 @app.get("/metrics")

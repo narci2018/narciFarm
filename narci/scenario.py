@@ -15,7 +15,8 @@ from .events import bus
 
 STEP_TYPES = {"tap", "swipe", "text", "key", "back", "home", "launch", "stop_app",
               "shell", "wait", "screenshot", "tap_text", "loop",
-              "wait_text", "assert_text", "rand_wait", "start_activity"}
+              "wait_text", "assert_text", "rand_wait", "start_activity",
+              "tap_image", "wait_image", "assert_image", "ocr_tap", "ocr_get"}
 
 _runs: dict[str, dict] = {}
 _lock = asyncio.Lock()
@@ -139,11 +140,72 @@ async def _execute_step(step: dict, serial: str, size: tuple[int, int],
         comp = str(step["component"])
         await adb.start_activity(serial, comp)
         return {"component": comp}
+    if stype == "tap_image":
+        from . import vision
+        path = vision.resolve_template(str(step["image"]))
+        res = await vision.match_on_device(serial, path, float(step.get("threshold", 0.8)))
+        if res is None:
+            raise ScenarioError(f"未匹配到图像: {path}")
+        cx, cy, score = res
+        await adb.input_tap(serial, cx, cy)
+        return {"center": (cx, cy), "score": round(score, 3)}
+    if stype == "wait_image":
+        from . import vision
+        path = vision.resolve_template(str(step["image"]))
+        threshold = float(step.get("threshold", 0.8))
+        timeout = float(step.get("timeout_ms", 10000)) / 1000.0
+        interval = max(float(step.get("interval_ms", 1000)) / 1000.0, 0.5)
+        deadline = time.time() + timeout
+        while True:
+            res = await vision.match_on_device(serial, path, threshold)
+            if res is not None:
+                return {"found": (res[0], res[1]), "score": round(res[2], 3)}
+            if time.time() >= deadline:
+                raise ScenarioError(f"等待图像超时({timeout:.0f}s): {path}")
+            await asyncio.sleep(interval)
+    if stype == "assert_image":
+        from . import vision
+        path = vision.resolve_template(str(step["image"]))
+        threshold = float(step.get("threshold", 0.8))
+        expect = str(step.get("expect", "exists"))
+        res = await vision.match_on_device(serial, path, threshold)
+        if expect == "exists" and res is None:
+            raise ScenarioError(f"断言失败: 未匹配到图像 {path}")
+        if expect == "absent" and res is not None:
+            raise ScenarioError(f"断言失败: 图像仍存在 {path}")
+        return {"expect": expect, "met": True}
+    if stype in ("ocr_tap", "ocr_get"):
+        from . import vision
+        import tempfile
+        data = await adb.screenshot_bytes(serial)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(data)
+            tmp_path = f.name
+        text = vision.ocr_text(tmp_path) or ""
+        if stype == "ocr_get":
+            return {"text": text}
+        target = str(step["text"])
+        if target not in text:
+            raise ScenarioError(f"OCR 未找到文本: {target}")
+        return {"text": text}
     raise ScenarioError(f"未实现步骤: {stype}")
 
 
+def substitute_vars(step: dict, variables: dict) -> dict:
+    """将步骤中的 {{变量}} 替换为运行期变量。"""
+    if not variables:
+        return step
+    out = {}
+    for k, v in step.items():
+        if isinstance(v, str):
+            for key, val in variables.items():
+                v = v.replace("{{" + key + "}}", str(val))
+        out[k] = v
+    return out
+
+
 async def _run_device(run_id: str, steps: list, repeat: int, serial: str,
-                      abort: asyncio.Event) -> None:
+                      abort: asyncio.Event, variables: dict) -> None:
     state = _runs[run_id]["devices"][serial]
     try:
         size = await adb.get_screen_size(serial)
@@ -151,7 +213,7 @@ async def _run_device(run_id: str, steps: list, repeat: int, serial: str,
             if abort.is_set():
                 break
             state["repeat"] = rep + 1
-            await _run_step_list(steps, serial, size, run_id, abort, state)
+            await _run_step_list(steps, serial, size, run_id, abort, state, variables)
         state["status"] = "aborted" if abort.is_set() else "done"
     except ScenarioError as e:
         state["status"] = "error"
@@ -171,7 +233,7 @@ async def _run_device(run_id: str, steps: list, repeat: int, serial: str,
 
 
 async def _run_step_list(steps: list, serial: str, size: tuple[int, int],
-                         run_id: str, abort: asyncio.Event, state: dict) -> None:
+                         run_id: str, abort: asyncio.Event, state: dict, variables: dict) -> None:
     for i, step in enumerate(steps):
         if abort.is_set():
             return
@@ -180,12 +242,12 @@ async def _run_step_list(steps: list, serial: str, size: tuple[int, int],
             for c in range(count):
                 if abort.is_set():
                     return
-                await _run_step_list(step["steps"], serial, size, run_id, abort, state)
+                await _run_step_list(step["steps"], serial, size, run_id, abort, state, variables)
             continue
         state["current"] = i + 1
         started = time.time()
         try:
-            result = await _execute_step(step, serial, size, run_id)
+            result = await _execute_step(substitute_vars(step, variables or {}), serial, size, run_id)
         except (ScenarioError, adb.AdbError):
             # 失败自动截图取证（尽力而为）
             with contextlib.suppress(Exception):
@@ -205,7 +267,7 @@ async def _run_step_list(steps: list, serial: str, size: tuple[int, int],
             state.setdefault("results", []).append({"index": i + 1, **result})
 
 
-async def start_run(steps: list, repeat: int, serials: list[str]) -> str:
+async def start_run(steps: list, repeat: int, serials: list[str], variables: dict = None) -> str:
     validate_steps(steps)
     run_id = uuid.uuid4().hex
     abort = asyncio.Event()
@@ -220,7 +282,7 @@ async def start_run(steps: list, repeat: int, serials: list[str]) -> str:
             "started_at": time.time(),
         }
     for serial in serials:
-        task = asyncio.create_task(_run_device(run_id, steps, repeat, serial, abort))
+        task = asyncio.create_task(_run_device(run_id, steps, repeat, serial, abort, variables or {}))
         _runs[run_id]["tasks"].append(task)
     return run_id
 

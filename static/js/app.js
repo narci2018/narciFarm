@@ -50,6 +50,16 @@ async function init() {
   bindBroadcast();
   bindBatch();
   bindScenario();
+  $('tpl-upload').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const fd = new FormData();
+    fd.append('file', f);
+    await API.post('/api/templates/upload', fd);
+    toast('模板已上传', 'ok');
+    loadTemplates();
+    e.target.value = '';
+  };
   bindSchedule();
   bindConsole();
   bindApps();
@@ -292,6 +302,7 @@ function bindTabs() {
       if (tab.dataset.tab === 'captures') loadCaptures();
       if (tab.dataset.tab === 'apps') loadApps();
       if (tab.dataset.tab === 'devtools') refreshDevTools();
+      if (tab.dataset.tab === 'scenario') loadTemplates();
       if (tab.dataset.tab === 'schedule') refreshSchedules();
     };
   });
@@ -423,6 +434,42 @@ async function refreshScenarios() {
   }
 }
 window.appRefreshScenarios = refreshScenarios;
+
+// ---------- 图像模板管理 ----------
+
+async function loadTemplates() {
+  try {
+    const r = await API.get('/api/templates');
+    const ul = $('tpl-list');
+    ul.innerHTML = '';
+    for (const t of r.templates) {
+      const li = document.createElement('li');
+      li.innerHTML = `<a href="/api/templates/${encodeURIComponent(t.name)}/preview" target="_blank" style="flex:1">${esc(t.name)}</a>
+        <span class="hint">${t.width}x${t.height}</span>
+        <button class="btn small danger">删</button>`;
+      li.querySelector('button').onclick = async () => {
+        await API.del(`/api/templates/${encodeURIComponent(t.name)}`);
+        loadTemplates();
+      };
+      ul.appendChild(li);
+    }
+    if (r.templates.length === 0) {
+      ul.innerHTML = '<li class="hint">暂无模板(上传截图区域作为匹配目标)</li>';
+    }
+    ul.innerHTML += r.ocr_available
+      ? '<li class="hint">OCR 可用</li>'
+      : '<li class="hint" style="color:var(--warn)">OCR 需系统安装 Tesseract</li>';
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function parseVars(text) {
+  const vars = {};
+  for (const line of (text || '').split(String.fromCharCode(10))) {
+    const m = line.match(/^\s*([\w一-龥]+)\s*=\s*(.+)$/);
+    if (m) vars[m[1]] = m[2].trim();
+  }
+  return vars;
+}
 
 function bindScenario() {
   $('sc-new').onclick = () => { State.currentScenario = null; ScenarioEditor.open(null); };

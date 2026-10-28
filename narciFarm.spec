@@ -47,7 +47,7 @@ hiddenimports = [
 ]
 
 excludes = [
-    "numpy", "tkinter", "matplotlib", "pandas", "scipy",
+    "tkinter", "matplotlib", "pandas", "scipy",
     "PyQt5", "PyQt6", "PySide2", "PySide6", "IPython", "jedi",
 ]
 

@@ -144,6 +144,11 @@
             <input id="sc-new-name" placeholder="新场景名">
             <button id="sc-new" class="btn small">新建</button>
           </div>
+          <h4 style="margin:10px 0 4px">图像模板</h4>
+          <ul id="tpl-list" class="plain-list" style="max-height:140px"></ul>
+          <div class="form-row">
+            <label class="btn small filelabel">上传模板<input type="file" id="tpl-upload" accept="image/*" hidden></label>
+          </div>
         </div>
         <div class="pane-card grow">
           <h3 id="sc-editor-title">编辑场景</h3>
@@ -164,6 +169,11 @@
               <option value="assert_text">assert_text 文本存在性断言</option>
               <option value="rand_wait">rand_wait 随机等待</option>
               <option value="start_activity">start_activity 拉起Activity</option>
+              <option value="tap_image">tap_image 图像匹配点击</option>
+              <option value="wait_image">wait_image 等待图像出现</option>
+              <option value="assert_image">assert_image 图像存在性断言</option>
+              <option value="ocr_tap">ocr_tap OCR找字点击(需Tesseract)</option>
+              <option value="ocr_get">ocr_get OCR取文字</option>
               <option value="loop">loop 循环</option>
             </select>
             <button id="sc-add" class="btn small">添加步骤</button>
@@ -173,6 +183,7 @@
           </div>
           <div class="form-row">
             <button id="sc-save" class="btn primary">保存场景</button>
+            <input id="sc-vars" placeholder="运行变量(每行 key=value, 步骤中用 {{key}} 引用)" style="width:220px">
             <button id="sc-run" class="btn primary">在选中设备运行</button>
             <span class="spacer"></span>
             <button id="sc-abort" class="btn danger">中止选中运行</button>

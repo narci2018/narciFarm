@@ -16,6 +16,11 @@ const STEP_FIELDS = {
   assert_text: [['text', '文本'], ['expect', 'exists(须存在) / absent(须不存在)']],
   rand_wait: [['min_ms', '最小ms'], ['max_ms', '最大ms']],
   start_activity: [['component', 'com.pkg/.MainActivity']],
+  tap_image: [['image', '模板文件名(如 btn.png)'], ['threshold', '阈值0~1']],
+  wait_image: [['image', '模板文件名'], ['timeout_ms', '超时ms'], ['interval_ms', '轮询ms'], ['threshold', '阈值0~1']],
+  assert_image: [['image', '模板文件名'], ['expect', 'exists / absent'], ['threshold', '阈值0~1']],
+  ocr_tap: [['text', '要找的文字']],
+  ocr_get: [['text', '要找的文字']],
   loop: [['count', '次数']],
 };
 
