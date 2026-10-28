@@ -4,7 +4,7 @@ import json
 import time
 from typing import Optional
 
-from . import adb, db, scenario
+from . import adb, db, distribution, scenario
 from .events import bus
 
 CHECK_INTERVAL = 15
@@ -99,7 +99,7 @@ async def _execute_schedule(schedule: dict) -> None:
         return
     steps = json.loads(sc["steps"])
     repeat = int(sc.get("repeat_count") or 1)
-    run_id = await scenario.start_run(steps, repeat, serials)
+    run_id = await scenario.start_run(steps, repeat, serials, scenario_name=sc["name"])
     bus.info(f"调度[{schedule['name']}] 触发场景[{sc['name']}] run={run_id[:8]} 设备={len(serials)}")
 
 
@@ -107,6 +107,11 @@ async def scheduler_loop() -> None:
     bus.info("调度器已启动")
     while True:
         try:
+            # 分发任务(内容分发调度)
+            try:
+                await distribution.run_due_tasks()
+            except Exception as e:
+                bus.error(f"分发调度异常: {type(e).__name__}: {e}")
             now = time.time()
             for schedule in db.due_schedules(now):
                 kind, value = schedule["kind"], schedule["value"]

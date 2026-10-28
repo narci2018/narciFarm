@@ -16,7 +16,9 @@ from .events import bus
 STEP_TYPES = {"tap", "swipe", "text", "key", "back", "home", "launch", "stop_app",
               "shell", "wait", "screenshot", "tap_text", "loop",
               "wait_text", "assert_text", "rand_wait", "start_activity",
-              "tap_image", "wait_image", "assert_image", "ocr_tap", "ocr_get"}
+              "tap_image", "wait_image", "assert_image", "find_image",
+              "ocr_tap", "ocr_get", "ocr_find",
+              "tap_el", "wait_el", "assert_el", "swipe_el"}
 
 _runs: dict[str, dict] = {}
 _lock = asyncio.Lock()
@@ -174,21 +176,83 @@ async def _execute_step(step: dict, serial: str, size: tuple[int, int],
         if expect == "absent" and res is not None:
             raise ScenarioError(f"断言失败: 图像仍存在 {path}")
         return {"expect": expect, "met": True}
-    if stype in ("ocr_tap", "ocr_get"):
+    if stype in ("ocr_tap", "ocr_get", "ocr_find"):
         from . import vision
-        import tempfile
-        data = await adb.screenshot_bytes(serial)
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(data)
-            tmp_path = f.name
-        text = vision.ocr_text(tmp_path) or ""
+        target = str(step.get("text", step.get("target", "")))
+        region = step.get("region")
+        if isinstance(region, (list, tuple)) and len(region) == 4:
+            region = tuple(int(v) for v in region)
+        else:
+            region = None
+        results = await vision.ocr_find_on_device(serial, target=target or None, region=region)
+        if stype == "ocr_find":
+            return {"matches": results, "count": len(results)}
         if stype == "ocr_get":
-            return {"text": text}
-        target = str(step["text"])
-        if target not in text:
+            return {"text": " ".join(r["text"] for r in results)}
+        if not results:
             raise ScenarioError(f"OCR 未找到文本: {target}")
-        return {"text": text}
+        best = max(results, key=lambda r: r["confidence"] if r["confidence"] >= 0 else -1)
+        cx, cy = best["center"]
+        await adb.input_tap(serial, cx, cy)
+        return {"center": (cx, cy), "text": best["text"], "confidence": best["confidence"]}
+    if stype == "find_image":
+        from . import vision
+        path = vision.resolve_template(str(step["image"]))
+        res = await vision.match_all_on_device(
+            serial, path, float(step.get("threshold", 0.8)),
+            max_results=int(step.get("max_results", 1)),
+            region=step.get("region"),
+            scales=step.get("scales"),
+        )
+        return {"matches": res, "count": len(res)}
+    if stype in ("tap_el", "wait_el", "assert_el", "swipe_el"):
+        return await _execute_element_step(step, serial)
     raise ScenarioError(f"未实现步骤: {stype}")
+
+
+async def _execute_element_step(step: dict, serial: str) -> dict:
+    """控件树 / 多维选择器步骤：tap_el / wait_el / assert_el / swipe_el。"""
+    spec = step.get("selector") or {
+        "kind": step.get("kind", "text"),
+        "value": step.get("value", step.get("text", "")),
+    }
+    kind, value, contains, index = adb.parse_selector(spec)
+    stype = step["type"]
+
+    if stype == "wait_el":
+        timeout = float(step.get("timeout_ms", 10000)) / 1000.0
+        interval = max(float(step.get("interval_ms", 1000)) / 1000.0, 0.5)
+        deadline = time.time() + timeout
+        while True:
+            el = await adb.find_element(serial, kind, value, contains=contains, index=index)
+            if el is not None:
+                return {"found": el["center"], "element": el}
+            if time.time() >= deadline:
+                raise ScenarioError(f"等待控件超时({timeout:.0f}s): {kind}={value}")
+            await asyncio.sleep(interval)
+
+    if stype == "assert_el":
+        expect = str(step.get("expect", "exists"))
+        el = await adb.find_element(serial, kind, value, contains=contains, index=index)
+        if expect == "exists" and el is None:
+            raise ScenarioError(f"断言失败: 未找到控件 {kind}={value}")
+        if expect == "absent" and el is not None:
+            raise ScenarioError(f"断言失败: 控件仍存在 {kind}={value}")
+        return {"expect": expect, "met": True, "element": el}
+
+    if stype == "swipe_el":
+        el = await adb.find_element(serial, kind, value, contains=contains, index=index)
+        if el is None or el["center"] is None:
+            raise ScenarioError(f"未找到控件: {kind}={value}")
+        x1, y1 = el["center"]
+        x2 = int(step.get("x2", x1))
+        y2 = int(step.get("y2", y1))
+        dur = int(step.get("duration_ms", 300))
+        await adb.input_swipe(serial, x1, y1, x2, y2, dur)
+        return {"from": (x1, y1), "to": (x2, y2), "duration_ms": dur}
+
+    el = await adb.tap_element(serial, kind, value, contains=contains, index=index)
+    return {"center": el["center"], "element": el}
 
 
 def substitute_vars(step: dict, variables: dict) -> dict:
@@ -246,9 +310,28 @@ async def _run_step_list(steps: list, serial: str, size: tuple[int, int],
             continue
         state["current"] = i + 1
         started = time.time()
-        try:
-            result = await _execute_step(substitute_vars(step, variables or {}), serial, size, run_id)
-        except (ScenarioError, adb.AdbError):
+        # 步骤级重试：retry 次重试，retry_interval_ms 退避，on_fail 决定最终失败时的行为
+        retries = max(0, int(step.get("retry", 0) or 0))
+        retry_interval = max(0.0, float(step.get("retry_interval_ms", 500) or 0) / 1000.0)
+        on_fail = str(step.get("on_fail", "abort"))
+        result: Optional[dict] = None
+        last_err: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            if abort.is_set():
+                return
+            try:
+                result = await _execute_step(substitute_vars(step, variables or {}), serial, size, run_id)
+                last_err = None
+                break
+            except (ScenarioError, adb.AdbError) as e:
+                last_err = e
+                if attempt < retries and not abort.is_set():
+                    bus.publish("info",
+                                f"场景运行[{run_id[:8]}] {serial} 步骤{i + 1}/{len(steps)} {step['type']} "
+                                f"第{attempt + 1}次失败，{retry_interval:.2f}s 后重试: {e}",
+                                run_id=run_id, serial=serial, step=step.get("type"))
+                    await asyncio.sleep(retry_interval)
+        if last_err is not None:
             # 失败自动截图取证（尽力而为）
             with contextlib.suppress(Exception):
                 from .config import CAPTURES_DIR
@@ -257,17 +340,26 @@ async def _run_step_list(steps: list, serial: str, size: tuple[int, int],
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
                 state["failure_shot"] = str(path)
-            raise
+            if on_fail == "continue":
+                state.setdefault("results", []).append(
+                    {"index": i + 1, "type": step["type"], "skipped": True,
+                     "error": str(last_err), "elapsed": round(time.time() - started, 3)})
+                state["done"] = state.get("done", 0) + 1
+                continue
+            raise last_err
         bus.publish("info",
                     f"场景运行[{run_id[:8]}] {serial} 步骤{i + 1}/{len(steps)} {step['type']} "
                     f"耗时{time.time() - started:.2f}s",
                     run_id=run_id, serial=serial, step=step.get("type"))
         state["done"] = state.get("done", 0) + 1
         if result:
-            state.setdefault("results", []).append({"index": i + 1, **result})
+            state.setdefault("results", []).append(
+                {"index": i + 1, "type": step["type"],
+                 "elapsed": round(time.time() - started, 3), **result})
 
 
-async def start_run(steps: list, repeat: int, serials: list[str], variables: dict = None) -> str:
+async def start_run(steps: list, repeat: int, serials: list[str], variables: dict = None,
+                    scenario_name: str = "") -> str:
     validate_steps(steps)
     run_id = uuid.uuid4().hex
     abort = asyncio.Event()
@@ -275,16 +367,55 @@ async def start_run(steps: list, repeat: int, serials: list[str], variables: dic
         _runs[run_id] = {
             "run_id": run_id,
             "status": "running",
+            "scenario": scenario_name,
+            "steps": steps,
             "repeat": repeat,
             "devices": {s: {"status": "running", "done": 0, "current": 0} for s in serials},
             "abort": abort,
             "tasks": [],
             "started_at": time.time(),
         }
+    device_tasks = []
     for serial in serials:
         task = asyncio.create_task(_run_device(run_id, steps, repeat, serial, abort, variables or {}))
+        device_tasks.append(task)
         _runs[run_id]["tasks"].append(task)
+    _runs[run_id]["tasks"].append(asyncio.create_task(_finalize_run(run_id, device_tasks)))
     return run_id
+
+
+async def _finalize_run(run_id: str, device_tasks: list) -> None:
+    """所有设备任务结束后生成并落盘测试报告。"""
+    for task in device_tasks:
+        try:
+            await task
+        except Exception:
+            pass
+    run = _runs.get(run_id)
+    if not run:
+        return
+    run = _runs.get(run_id)
+    if not run:
+        return
+    run["status"] = "finished"
+    try:
+        from . import reports
+        rep = reports.build_report(run_id, run, scenario_name=run.get("scenario", ""),
+                                   steps=run.get("steps"))
+        reports.save_report(rep)
+        run["report_id"] = rep["report_id"]
+    except Exception as e:  # 报告失败不影响运行结果
+        bus.warn(f"报告生成失败[{run_id[:8]}]: {e}")
+
+
+def get_run(run_id: str) -> Optional[dict]:
+    """取运行记录（含步骤结果），供报告构建使用。"""
+    return _runs.get(run_id)
+
+
+def get_report_id(run_id: str) -> Optional[str]:
+    run = _runs.get(run_id)
+    return run.get("report_id") if run else None
 
 
 async def abort_run(run_id: str) -> bool:

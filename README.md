@@ -5,6 +5,8 @@
 
 📖 **完整使用手册：[docs/使用手册.md](docs/使用手册.md)**（安装启动 / 设备接入 / 群控与录制 / 场景步骤参考 / FAQ / API 速查）
 
+🔍 **竞品功能差距分析：[docs/竞品功能差距分析.md](docs/竞品功能差距分析.md)**（群控/云控/设备农场/MDM/自动化工具的功能并集与缺口清单）
+
 > ⚠️ 本项目定位是设备农场管理工具，**不包含**也不接受任何平台定向脚本、账号批量注册、
 > 流量造假或反检测/设备指纹伪装功能。请仅将本工具用于你拥有或获得授权的设备与应用。
 
@@ -36,6 +38,11 @@ FastAPI 后端 (narci/)
 | 视觉节点自动化的可维护替代：`tap_text`（uiautomator dump 按文本点击） | uiautomator2/Airtest 思路 |
 | stay awake 停留唤醒、批量截图/安装/推送/Shell | adb-device-farm / Evelin |
 | 快照轮询降级模式（WebCodecs 不可用时自动切换） | ws-scrcpy 思路 |
+| 控件树与多维元素定位（text/id/desc/class/package/xpath，含 XPath 子集） | uiautomator2 / Appium / Poco |
+| OCR 坐标级识别与点击（返回边界框 + 置信度，按识别框中心点击） | AutoX.js / 按键精灵 OcrEX |
+| 图像多结果/多尺度匹配（NCC + 金字塔缩放 + 区域限定 + NMS 去重） | Airtest aircv |
+| 步骤级失败重试（retry / 退避 / continue-on-fail） | Maestro / SoloPi |
+| 测试报告持久化与导出（JSON / HTML / JUnit XML） | Airtest / Maestro / SoloPi |
 
 ## 快速开始
 

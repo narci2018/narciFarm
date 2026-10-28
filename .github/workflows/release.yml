@@ -84,18 +84,33 @@ jobs:
           name: narciFarm-windows-x64
           path: narciFarm-windows-x64.exe
 
+      - name: 生成发布说明
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $f = "docs/release-notes/$tag.md"
+          if (Test-Path $f) {
+            Copy-Item $f release_notes.md -Force
+            Write-Host "使用版本发布说明: $f"
+          } else {
+            @"
+          ## narciFarm `$tag
+
+          - **narciFarm-windows-x64.exe**：PC 端单文件程序（内置 adb 与 scrcpy-server）。无控制台窗口，启动后以系统托盘图标常驻（打开管理台 / 关闭服务），数据与日志在 exe 同级目录
+          - **scrcpy-server-${{ env.SCRCPY_VERSION }}**：安卓端被控服务（本仓库 CI 从 scrcpy v${{ env.SCRCPY_VERSION }} 源码构建的 dex jar，与 exe 内置的官方预编译版同版本，可互换）
+
+          使用：运行 exe 后浏览器自动打开管理台；手机开启 USB 调试即可被识别。关闭：托盘图标右键 → 关闭服务。
+          详见仓库 docs/release-notes/ 与 docs/使用手册.md。
+          "@ | Out-File -Encoding utf8 release_notes.md
+            Write-Host "未找到 $f，使用默认说明"
+          }
+
       - name: 附加到 GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: narciFarm-windows-x64.exe
-          body: |
-            ## narciFarm ${{ github.ref_name }}
-
-            - **narciFarm-windows-x64.exe**：PC 端单文件程序（内置 adb 与 scrcpy-server）。无控制台窗口，启动后以系统托盘图标常驻（打开管理台 / 关闭服务），数据与日志在 exe 同级目录
-            - **scrcpy-server-${{ env.SCRCPY_VERSION }}**：安卓端被控服务（本仓库 CI 从 [scrcpy v${{ env.SCRCPY_VERSION }}](https://github.com/Genymobile/scrcpy) 源码构建的 dex jar，与 exe 内置的官方预编译版同版本，可互换）
-
-            使用：运行 exe 后浏览器自动打开管理台；手机开启 USB 调试即可被识别。关闭：托盘图标右键 → 关闭服务。
+          body_path: release_notes.md
           fail_on_unmatched_files: true
 
   build-android-server:

@@ -1,0 +1,11 @@
+{
+  "name": "narcifarm-web",
+  "private": true,
+  "description": "narciFarm 前端的第三方浏览器包。前端无构建步骤，本文件只用于把 posthog-js 的 ES module 包同步到 static/vendor（npm run vendor:posthog）。",
+  "scripts": {
+    "vendor:posthog": "node -e \"const fs=require('fs');fs.mkdirSync('static/vendor/posthog-js',{recursive:true});fs.copyFileSync('node_modules/posthog-js/dist/module.full.no-external.js','static/vendor/posthog-js/module.full.no-external.js')\""
+  },
+  "dependencies": {
+    "posthog-js": "1.438.24"
+  }
+}

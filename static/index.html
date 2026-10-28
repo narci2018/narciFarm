@@ -70,7 +70,9 @@
       <button class="tab" data-tab="devtools">开发工具</button>
       <button class="tab hidden" data-tab="team" id="tab-team-btn">团队</button>
       <button class="tab" data-tab="stats">统计</button>
+      <button class="tab" data-tab="reports">报告</button>
       <button class="tab" data-tab="monitor">监控</button>
+      <button class="tab" data-tab="ops">运营</button>
       <button class="tab" data-tab="captures">截图库</button>
       <button class="tab" data-tab="logs">日志</button>
     </nav>
@@ -193,6 +195,12 @@
               <option value="assert_image">assert_image 图像存在性断言</option>
               <option value="ocr_tap">ocr_tap OCR找字点击(需Tesseract)</option>
               <option value="ocr_get">ocr_get OCR取文字</option>
+              <option value="ocr_find">ocr_find OCR坐标查找(返回边界框)</option>
+              <option value="find_image">find_image 图像多结果匹配</option>
+              <option value="tap_el">tap_el 控件定位点击(text/id/desc/class/xpath)</option>
+              <option value="wait_el">wait_el 等待控件出现</option>
+              <option value="assert_el">assert_el 控件存在性断言</option>
+              <option value="swipe_el">swipe_el 控件内滑动</option>
               <option value="loop">loop 循环</option>
             </select>
             <button id="sc-add" class="btn small">添加步骤</button>
@@ -252,6 +260,63 @@
       </div>
     </section>
 
+    <section id="tab-ops" class="tabpane">
+      <div class="pane-card">
+        <h3>账号管理</h3>
+        <div class="form-row">
+          <input id="ac-platform" placeholder="平台(抖音/快手/小红书/微信/B站)">
+          <input id="ac-name" placeholder="账号名">
+          <input id="ac-username" placeholder="用户名">
+          <input id="ac-token" placeholder="API Token(可选)">
+          <input id="ac-base" placeholder="API地址(可选, 网关)">
+          <button class="btn small primary" id="ac-add">添加账号</button>
+        </div>
+        <div class="form-row">
+          <select id="ac-device-bind"></select>
+          <button class="btn small" id="ac-bind">绑定到设备</button>
+        </div>
+        <table class="data-table" id="ac-table"><thead><tr><th>ID</th><th>平台</th><th>名称</th><th>绑定设备</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>内容库</h3>
+        <div class="form-row">
+          <input id="ct-title" placeholder="标题" style="width:200px">
+          <select id="ct-type"><option value="text">文本</option><option value="image">图片</option><option value="video">视频</option></select>
+          <textarea id="ct-text" rows="2" placeholder="正文内容" style="flex:1"></textarea>
+          <label class="btn small filelabel">上传媒体<input type="file" id="ct-file" hidden></label>
+          <button class="btn small primary" id="ct-add">添加内容</button>
+        </div>
+        <table class="data-table" id="ct-table"><thead><tr><th>ID</th><th>标题</th><th>类型</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>分发任务</h3>
+        <div class="form-row">
+          <select id="dt-content"></select>
+          <select id="dt-account"></select>
+          <input id="dt-time" placeholder="时间 YYYY-MM-DD HH:MM" style="width:170px">
+          <button class="btn small primary" id="dt-add">创建任务</button>
+        </div>
+        <table class="data-table" id="dt-table"><thead><tr><th>ID</th><th>内容</th><th>账号</th><th>计划时间</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>账号数据看板</h3>
+        <table class="data-table" id="mt-table"><thead><tr><th>账号</th><th>平台</th><th>粉丝</th><th>关注</th><th>点赞</th><th>评论</th><th>播放</th><th>手动录入</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>设备标签 / 反向转发</h3>
+        <div class="form-row">
+          <select id="tg-device"></select>
+          <input id="tg-key" placeholder="标签名" style="width:120px">
+          <input id="tg-value" placeholder="值" style="width:120px">
+          <button class="btn small" id="tg-set">设置标签</button>
+          <input id="rv-device-port" type="number" placeholder="设备端口" style="width:100px">
+          <input id="rv-host-port" type="number" placeholder="PC端口" style="width:100px">
+          <button class="btn small" id="rv-add">反向转发</button>
+        </div>
+        <div id="tg-list" class="hint"></div>
+      </div>
+    </section>
+
     <section id="tab-monitor" class="tabpane">
       <div class="pane-card">
         <div class="form-row"><h3 style="margin:0">设备健康</h3><button class="btn small" id="mon-refresh">刷新</button></div>
@@ -280,6 +345,27 @@
           <button class="btn small" id="wh-save">保存</button>
           <button class="btn small" id="wh-test">测试</button>
         </div>
+      </div>
+    </section>
+
+    <section id="tab-reports" class="tabpane">
+      <div class="pane-card">
+        <h3>测试报告</h3>
+        <div class="hint">场景运行结束后自动生成报告，可导出 JSON / HTML / JUnit XML 用于 CI 归档。</div>
+        <div class="form-row">
+          <input id="rp-filter" placeholder="按场景名过滤" style="width:220px">
+          <button id="rp-refresh" class="btn small">刷新</button>
+          <span class="spacer"></span>
+          <span id="rp-summary" class="hint"></span>
+        </div>
+        <table class="data-table" id="rp-table">
+          <thead><tr><th>场景</th><th>状态</th><th>设备</th><th>步骤</th><th>失败</th><th>耗时</th><th>时间</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="pane-card">
+        <h3>报告详情</h3>
+        <div id="rp-detail" class="hint">选择一条报告查看步骤明细</div>
       </div>
     </section>
 
@@ -338,6 +424,42 @@
           <button class="btn small" data-cmd="logcat">复制 logcat 命令</button>
           <button class="btn small" data-cmd="forward">复制 forward 命令</button>
         </div>
+        <h4>控件树 / 元素定位</h4>
+        <div class="hint">按文本、资源 ID、content-desc、类名、包名或 XPath 定位控件，用于场景步骤与手动排查。</div>
+        <div class="form-row">
+          <select id="dt-el-kind">
+            <option value="text">text 文本</option>
+            <option value="id">id 资源ID</option>
+            <option value="desc">desc 描述</option>
+            <option value="class">class 类名</option>
+            <option value="package">package 包名</option>
+            <option value="xpath">xpath 表达式</option>
+          </select>
+          <input id="dt-el-value" placeholder="匹配值" style="flex:1">
+          <label class="hint"><input type="checkbox" id="dt-el-contains"> 模糊</label>
+          <button class="btn small" id="dt-el-find">查找</button>
+          <button class="btn small" id="dt-el-tree">刷新控件树</button>
+        </div>
+        <div class="form-row">
+          <span class="hint" id="dt-el-count"></span>
+          <span class="spacer"></span>
+          <span class="hint" id="dt-el-hint"></span>
+        </div>
+        <table class="data-table" id="dt-el-table">
+          <thead><tr><th>文本</th><th>资源ID</th><th>类名</th><th>中心</th><th>可点</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <h4>OCR 坐标识别</h4>
+        <div class="hint">返回带边界框与置信度的识别结果，可用于 ocr_tap 点击与区域核对。</div>
+        <div class="form-row">
+          <input id="dt-ocr-target" placeholder="过滤文字(可选)" style="width:180px">
+          <button class="btn small" id="dt-ocr-run">识别屏幕</button>
+          <span class="hint" id="dt-ocr-count"></span>
+        </div>
+        <table class="data-table" id="dt-ocr-table">
+          <thead><tr><th>文字</th><th>边界框</th><th>中心</th><th>置信度</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
         <h4>启动耗时测量</h4>
         <div class="form-row">
           <input id="dt-package" placeholder="包名, 如 com.android.settings">
@@ -481,12 +603,12 @@
 </div>
 <!-- posthog-js 以 ES module 引入（无构建步骤）：importmap 把裸导入名指到本地 SDK 副本 -->
 <script type="importmap">
-{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=043"}}
+{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=046"}}
 </script>
-<script src="/static/js/api.js?v=043"></script>
-<script type="module" src="/static/js/analytics.js?v=043"></script>
-<script src="/static/js/mirror.js?v=043"></script>
-<script src="/static/js/scenario.js?v=043"></script>
-<script src="/static/js/app.js?v=043"></script>
+<script src="/static/js/api.js?v=046"></script>
+<script type="module" src="/static/js/analytics.js?v=046"></script>
+<script src="/static/js/mirror.js?v=046"></script>
+<script src="/static/js/scenario.js?v=046"></script>
+<script src="/static/js/app.js?v=046"></script>
 </body>
 </html>

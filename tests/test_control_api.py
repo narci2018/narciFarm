@@ -1,9 +1,4 @@
 """统一注入入口 /api/input 回归测试（v0.3.0 重构后 PC 操作手机的唯一链路）。"""
-import os
-import tempfile
-
-os.environ["NARCI_DATA_DIR"] = tempfile.mkdtemp(prefix="narci_test_")
-
 import pytest
 from fastapi.testclient import TestClient
 

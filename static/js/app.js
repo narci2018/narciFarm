@@ -30,6 +30,7 @@ document.addEventListener('narci:analytics-ready', bootAnalytics);
 // ---------- 初始化 ----------
 
 async function init() {
+  await initAuth();
   try { State.settings = await API.get('/api/settings'); } catch (e) {}
   // 使用分析：默认关闭，用户勾选「使用分析」后才初始化（见 analytics.js）
   State.settingsLoaded = true;
@@ -65,6 +66,8 @@ async function init() {
   bindApps();
   bindDevTools();
   bindMonitor();
+  bindOps();
+  bindReports();
   $('login-btn').onclick = doLogin;
   $('login-pass').onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
   $('btn-logout').onclick = doLogout;
@@ -86,9 +89,16 @@ async function init() {
   };
   bindCaptures();
   bindModal();
-  connectEventStream();
 
-  await Promise.all([refreshDevices(), refreshGroups(), refreshScenarios(), refreshSchedules()]);
+  // 未登录时不拉取数据，避免 401 噪声；登录后由 showMain() 触发首轮加载
+  if (State.user) startDataPolling();
+}
+
+function startDataPolling() {
+  if (State._polling) return;
+  State._polling = true;
+  connectEventStream();
+  Promise.all([refreshDevices(), refreshGroups(), refreshScenarios(), refreshSchedules()]);
   if (window.Analytics) {
     window.Analytics.capture('app_loaded', {
       devices: State.devices.length,
@@ -341,6 +351,8 @@ function bindTabs() {
       if (tab.dataset.tab === 'scenario') loadTemplates();
       if (tab.dataset.tab === 'team') loadTeam();
       if (tab.dataset.tab === 'stats') loadStats();
+      if (tab.dataset.tab === 'reports') loadReports();
+      if (tab.dataset.tab === 'ops') loadOps();
       if (tab.dataset.tab === 'monitor') loadMonitor();
       if (tab.dataset.tab === 'overview') loadMyBookings();
       if (tab.dataset.tab === 'schedule') refreshSchedules();
@@ -1001,6 +1013,90 @@ function showPrompt(opts) {
 const PerfHistory = { cpu: [], mem: [], temp: [], fps: [] };
 const PERF_MAX = 60;
 
+async function refreshHierarchy() {
+  const serial = $('dt-device').value;
+  if (!serial) { $('dt-el-count').textContent = '请先选择设备'; return; }
+  $('dt-el-count').textContent = '读取中…';
+  try {
+    const r = await API.get(`/api/devices/${encodeURIComponent(serial)}/hierarchy`);
+    renderElementRows(r.nodes || []);
+    $('dt-el-count').textContent = `${r.count} 个节点`;
+  } catch (e) {
+    $('dt-el-count').textContent = '';
+    toast(e.message, 'error');
+  }
+}
+
+async function findElements() {
+  const serial = $('dt-device').value;
+  const kind = $('dt-el-kind').value;
+  const value = $('dt-el-value').value.trim();
+  if (!serial) { toast('请先选择设备', 'error'); return; }
+  if (kind !== 'xpath' && !value) { toast('请填写匹配值', 'error'); return; }
+  $('dt-el-count').textContent = '查找中…';
+  try {
+    const r = await API.get(`/api/devices/${encodeURIComponent(serial)}/elements`, { kind, value, contains: $('dt-el-contains').checked });
+    renderElementRows(r.elements || []);
+    $('dt-el-count').textContent = `${r.count} 个匹配`;
+    $('dt-el-hint').textContent = r.count ? '点击"点击"可在场景里生成 tap_el 步骤' : '';
+  } catch (e) {
+    $('dt-el-count').textContent = '';
+    toast(e.message, 'error');
+  }
+}
+
+function renderElementRows(nodes) {
+  const tb = $('dt-el-table').querySelector('tbody');
+  tb.innerHTML = nodes.length ? '' : '<tr><td colspan="6" class="hint">无结果</td></tr>';
+  for (const n of nodes.slice(0, 200)) {
+    const tr = document.createElement('tr');
+    const c = n.center ? `${n.center[0]},${n.center[1]}` : '—';
+    tr.innerHTML = `<td>${esc(n.text || '')}</td><td>${esc(n.id || n.resource_id || '')}</td>` +
+      `<td>${esc(n.class || '')}</td><td class="hint">${c}</td>` +
+      `<td>${n.clickable ? '✔' : ''}</td>` +
+      `<td><button class="btn small" data-k="${esc(n.id || n.text || '')}" data-t="${esc(n.text || '')}">点击</button></td>`;
+    tr.querySelector('button').onclick = async () => {
+      const serial = $('dt-device').value;
+      try {
+        await API.post(`/api/input`, { serials: [serial], action: 'tap',
+          params: { x: n.center[0], y: n.center[1] } });
+        toast(`已点击 ${n.text || n.id || ''}`, 'ok');
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    tb.appendChild(tr);
+  }
+}
+
+async function runOcr() {
+  const serial = $('dt-device').value;
+  if (!serial) { toast('请先选择设备', 'error'); return; }
+  const target = $('dt-ocr-target').value.trim() || null;
+  $('dt-ocr-count').textContent = '识别中…';
+  try {
+    const r = await API.post(`/api/devices/${encodeURIComponent(serial)}/ocr`, { target });
+    const tb = $('dt-ocr-table').querySelector('tbody');
+    tb.innerHTML = r.matches.length ? '' : '<tr><td colspan="5" class="hint">无识别结果(需安装 Tesseract)</td></tr>';
+    for (const m of r.matches.slice(0, 200)) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(m.text)}</td><td class="hint">${m.bounds.join(',')}</td>` +
+        `<td class="hint">${m.center.join(',')}</td><td>${m.confidence}</td>` +
+        `<td><button class="btn small">点击</button></td>`;
+      tr.querySelector('button').onclick = async () => {
+        try {
+          await API.post(`/api/input`, { serials: [serial], action: 'tap',
+            params: { x: m.center[0], y: m.center[1] } });
+          toast(`已点击 OCR "${m.text}"`, 'ok');
+        } catch (e) { toast(e.message, 'error'); }
+      };
+      tb.appendChild(tr);
+    }
+    $('dt-ocr-count').textContent = `${r.count} 个结果`;
+  } catch (e) {
+    $('dt-ocr-count').textContent = '';
+    toast(e.message, 'error');
+  }
+}
+
 function bindDevTools() {
   $('dt-device').onchange = () => refreshDevTools();
   $('dt-file-refresh').onclick = loadDeviceFiles;
@@ -1028,6 +1124,10 @@ function bindDevTools() {
   $('dt-log-live').onchange = (e) => { State._logcatTimer && clearInterval(State._logcatTimer); if (e.target.checked) State._logcatTimer = setInterval(loadLogcat, 3000); };
   $('dt-startup-cold').onclick = () => measureStartup(true);
   $('dt-startup-warm').onclick = () => measureStartup(false);
+  $('dt-el-find').onclick = findElements;
+  $('dt-el-tree').onclick = refreshHierarchy;
+  $('dt-el-value').onkeydown = (e) => { if (e.key === 'Enter') findElements(); };
+  $('dt-ocr-run').onclick = runOcr;
   document.querySelectorAll('#tab-devtools [data-cmd]').forEach(btn => {
     btn.onclick = () => {
       const serial = $('dt-device').value;
@@ -1176,8 +1276,8 @@ function showMain() {
   $('tab-team-btn').classList.toggle('hidden', State.user.role !== 'admin');
   if (!State._inited) {
     State._inited = true;
-    
-init();
+    startDataPolling();
+    loadOps();
   }
 }
 
@@ -1374,9 +1474,269 @@ async function loadStats() {
 }
 
 
+// ---------- 运营: 账号 / 内容 / 分发 / 数据 / 标签 / 反向转发 ----------
+
+async function loadOps() {
+  await Promise.all([loadAccounts(), loadContents(), loadDistTasks(), loadMetrics(), loadTags()]);
+  fillOpsDeviceSelects();
+}
+
+function fillOpsDeviceSelects() {
+  const online = State.devices.filter(d => d.state === 'device');
+  for (const selId of ['ac-device-bind', 'tg-device']) {
+    const sel = $(selId);
+    if (!sel) continue;
+    const cur = sel.value;
+    sel.innerHTML = online.map(d => `<option value="${esc(d.serial)}">${esc(d.serial)}</option>`).join('');
+    if (cur) sel.value = cur;
+  }
+}
+
+async function loadAccounts() {
+  try {
+    const accounts = await API.get('/api/accounts');
+    const tb = $('ac-table').querySelector('tbody');
+    tb.innerHTML = accounts.length ? '' : '<tr><td colspan="6" class="hint">暂无账号</td></tr>';
+    for (const a of accounts) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${a.id}</td><td>${esc(a.platform)}</td><td>${esc(a.name)}</td>
+        <td>${esc((a.devices || []).map(d => d.slice(0, 12)).join(', ') || '—')}</td>
+        <td>${a.status === 'active' ? '✅' : '⏸'}</td>
+        <td><button class="btn small danger" data-del="${a.id}">删</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/accounts/${b.dataset.del}`);
+      loadAccounts();
+    });
+    const dt = $('dt-account');
+    const cur = dt.value;
+    dt.innerHTML = accounts.map(a => `<option value="${a.id}">#${a.id} ${esc(a.name)} (${esc(a.platform)})</option>`).join('');
+    if (cur) dt.value = cur;
+  } catch (e) {}
+}
+
+async function loadContents() {
+  try {
+    const contents = await API.get('/api/contents');
+    const tb = $('ct-table').querySelector('tbody');
+    tb.innerHTML = contents.length ? '' : '<tr><td colspan="4" class="hint">暂无内容</td></tr>';
+    for (const c of contents) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${c.id}</td><td>${esc(c.title)}</td><td>${esc(c.type)}</td>
+        <td><button class="btn small danger" data-del="${c.id}">删</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/contents/${b.dataset.del}`);
+      loadContents();
+    });
+    const dt = $('dt-content');
+    const cur = dt.value;
+    dt.innerHTML = contents.map(c => `<option value="${c.id}">#${c.id} ${esc(c.title)}</option>`).join('');
+    if (cur) dt.value = cur;
+  } catch (e) {}
+}
+
+async function loadDistTasks() {
+  try {
+    const tasks = await API.get('/api/distribution-tasks');
+    const tb = $('dt-table').querySelector('tbody');
+    tb.innerHTML = tasks.length ? '' : '<tr><td colspan="6" class="hint">暂无任务</td></tr>';
+    for (const t of tasks) {
+      const tr = document.createElement('tr');
+      const st = t.scheduled_at ? new Date(t.scheduled_at * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.content_title || '')}</td><td>${esc(t.account_name || '')}</td>
+        <td class="hint">${st}</td><td>${esc(t.status)}</td>
+        <td><button class="btn small danger" data-del="${t.id}">删</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/distribution-tasks/${b.dataset.del}`);
+      loadDistTasks();
+    });
+  } catch (e) {}
+}
+
+async function loadMetrics() {
+  try {
+    const s = await API.get('/api/metrics/summary');
+    const tb = $('mt-table').querySelector('tbody');
+    tb.innerHTML = s.accounts.length ? '' : '<tr><td colspan="8" class="hint">暂无账号数据</td></tr>';
+    for (const a of s.accounts) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(a.name)}</td><td>${esc(a.platform)}</td><td>${a.followers}</td>
+        <td>${a.following}</td><td>${a.likes}</td><td>${a.comments}</td><td>${a.views}</td>
+        <td><button class="btn small" data-mt="${a.id}">录入</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-mt]').forEach(b => b.onclick = () => recordMetric(b.dataset.mt));
+  } catch (e) {}
+}
+
+async function recordMetric(account_id) {
+  const values = await showPrompt({
+    title: '录入账号数据', message: '粉丝,关注,点赞,评论,播放(逗号分隔)',
+    defaultValue: '0,0,0,0,0',
+  });
+  if (values === null) return;
+  const parts = values.split(',').map(x => parseInt(x) || 0);
+  while (parts.length < 5) parts.push(0);
+  await API.post(`/api/accounts/${account_id}/metrics`,
+    { followers: parts[0], following: parts[1], likes: parts[2], comments: parts[3], views: parts[4] });
+  toast('数据已录入', 'ok');
+  loadMetrics();
+}
+
+async function loadTags() {
+  try {
+    const tags = await API.get('/api/device-tags');
+    const box = $('tg-list');
+    const serials = Object.keys(tags);
+    box.innerHTML = serials.length ? '' : '<span class="hint">暂无标签</span>';
+    for (const serial of serials) {
+      const div = document.createElement('div');
+      div.className = 'hint';
+      div.innerHTML = `<span class="dserial">${esc(serial)}</span> ` +
+        Object.entries(tags[serial]).map(([k, v]) => `${esc(k)}=${esc(v)}`).join(' ');
+      box.appendChild(div);
+    }
+  } catch (e) {}
+}
+
+function bindOps() {
+  $('ac-add').onclick = async () => {
+    const platform = $('ac-platform').value.trim();
+    const name = $('ac-name').value.trim();
+    if (!platform || !name) return toast('请填写平台和名称', 'error');
+    await API.post('/api/accounts', { platform, name, username: $('ac-username').value,
+      api_token: $('ac-token').value, api_base: $('ac-base').value });
+    toast('账号已添加', 'ok');
+    loadAccounts();
+  };
+  $('ac-bind').onclick = async () => {
+    const serial = $('ac-device-bind').value;
+    const sel = document.querySelector('#ac-table tbody tr');
+    const account_id = sel ? sel.querySelector('td').textContent : null;
+    if (!serial || !account_id) return toast('请选择账号和设备', 'error');
+    await API.post(`/api/accounts/${account_id}/bind`, { serial });
+    toast('已绑定', 'ok');
+    loadAccounts();
+  };
+  $('ct-add').onclick = async () => {
+    const title = $('ct-title').value.trim();
+    if (!title) return toast('请填写标题', 'error');
+    const media = $('ct-file').files[0];
+    let media_path = '';
+    if (media) {
+      const fd = new FormData();
+      fd.append('file', media);
+      const r = await API.post('/api/contents/upload', fd);
+      media_path = r.path || '';
+    }
+    await API.post('/api/contents', { title, type: $('ct-type').value, text: $('ct-text').value, media_path });
+    toast('内容已添加', 'ok');
+    $('ct-title').value = ''; $('ct-text').value = '';
+    loadContents();
+  };
+  $('dt-add').onclick = async () => {
+    const content_id = parseInt($('dt-content').value);
+    const account_id = parseInt($('dt-account').value);
+    const timeStr = $('dt-time').value.trim();
+    if (!content_id || !account_id || !timeStr) return toast('请完整填写', 'error');
+    const d = new Date(timeStr.replace(' ', 'T'));
+    if (isNaN(d.getTime())) return toast('时间格式错误', 'error');
+    await API.post('/api/distribution-tasks', { content_id, account_id, scheduled_at: d.getTime() / 1000 });
+    toast('分发任务已创建', 'ok');
+    loadDistTasks();
+  };
+  $('tg-set').onclick = async () => {
+    const serial = $('tg-device').value;
+    const key = $('tg-key').value.trim();
+    const value = $('tg-value').value.trim();
+    if (!serial || !key) return toast('请填写设备、标签名', 'error');
+    await API.put(`/api/devices/${encodeURIComponent(serial)}/tags`, { tags: { [key]: value } });
+    toast('标签已设置', 'ok');
+    loadTags();
+  };
+  $('rv-add').onclick = async () => {
+    const serial = $('tg-device').value;
+    const device_port = parseInt($('rv-device-port').value);
+    const host_port = parseInt($('rv-host-port').value);
+    if (!serial || !device_port || !host_port) return toast('请完整填写', 'error');
+    await API.post(`/api/devices/${encodeURIComponent(serial)}/reverse`, { device_port, host_port });
+    toast(`反向转发已建立: 设备:${device_port} → PC:${host_port}`, 'ok');
+  };
+}
+
 init();
 
-initAuth();
+// ---------- 测试报告 ----------
+
+async function loadReports() {
+  try {
+    const list = await API.get('/api/reports');
+    const q = ($('rp-filter').value || '').trim().toLowerCase();
+    const rows = list.filter(r => !q || String(r.scenario || '').toLowerCase().includes(q));
+    const tb = $('rp-table').querySelector('tbody');
+    tb.innerHTML = rows.length ? '' : '<tr><td colspan="8" class="hint">暂无报告</td></tr>';
+    for (const r of rows) {
+      const tr = document.createElement('tr');
+      const sm = r.summary || {};
+      const t = r.created_at ? new Date(r.created_at * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+      const badge = r.status === 'passed' ? '✅' : (r.status === 'failed' ? '❌' : '⏳');
+      tr.innerHTML = `<td>${esc(r.scenario || '—')}</td><td>${badge}</td>` +
+        `<td>${sm.devices ?? '—'}</td><td>${sm.steps_total ?? '—'}</td>` +
+        `<td>${sm.steps_failed ?? 0}</td><td>${r.duration_s ?? '—'}s</td>` +
+        `<td class="hint">${t}</td>` +
+        `<td><button class="btn small" data-act="view">查看</button>` +
+        `<button class="btn small" data-act="html">HTML</button>` +
+        `<button class="btn small" data-act="xml">JUnit</button></td>`;
+      tr.querySelector('[data-act="view"]').onclick = () => showReportDetail(r.report_id);
+      tr.querySelector('[data-act="html"]').onclick = () => window.open(`/api/reports/${r.report_id}.html`, '_blank');
+      tr.querySelector('[data-act="xml"]').onclick = () => window.open(`/api/reports/${r.report_id}.xml`, '_blank');
+      tb.appendChild(tr);
+    }
+    const passed = rows.filter(r => r.status === 'passed').length;
+    const failed = rows.filter(r => r.status === 'failed').length;
+    $('rp-summary').textContent = `共 ${rows.length} 份 · 通过 ${passed} · 失败 ${failed}`;
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function showReportDetail(reportId) {
+  try {
+    const r = await API.get(`/api/reports/${reportId}`);
+    const box = $('rp-detail');
+    let html = `<div class="form-row"><b>${esc(r.scenario || '未命名')}</b>` +
+      `<span class="hint">run=${esc(String(r.run_id || '').slice(0, 8))} · ${esc(r.status)} · ` +
+      `${r.duration_s ?? 0}s · ${(r.devices && Object.keys(r.devices).length) || 0} 台设备</span></div>`;
+    for (const [serial, d] of Object.entries(r.devices || {})) {
+      html += `<div class="pane-card" style="margin:8px 0"><div class="form-row">` +
+        `<span class="dserial">${esc(serial)}</span><span class="hint">${esc(d.status)}` +
+        (d.error ? ` · ${esc(d.error)}` : '') +
+        (d.failure_shot ? ` · 截图 ${esc(d.failure_shot)}` : '') +
+        `</span></div>`;
+      if (d.results && d.results.length) {
+        html += '<table class="data-table"><thead><tr><th>#</th><th>步骤</th><th>耗时s</th><th>结果</th></tr></thead><tbody>';
+        for (const step of d.results) {
+          const bad = step.skipped || step.error;
+          const detail = step.error || JSON.stringify(
+            Object.fromEntries(Object.entries(step).filter(([k]) => !['index', 'type', 'elapsed'].includes(k))));
+          html += `<tr class="${bad ? 'fail' : ''}"><td>${step.index}</td><td>${esc(step.type)}</td>` +
+            `<td>${step.elapsed ?? ''}</td><td>${esc(String(detail))}</td></tr>`;
+        }
+        html += '</tbody></table>';
+      }
+      html += '</div>';
+    }
+    box.innerHTML = html;
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function bindReports() {
+  $('rp-refresh').onclick = loadReports;
+  $('rp-filter').onkeydown = (e) => { if (e.key === 'Enter') loadReports(); };
+}
 
 // ---------- 监控告警 ----------
 

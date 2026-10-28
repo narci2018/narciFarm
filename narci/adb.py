@@ -382,6 +382,123 @@ async def find_text(serial: str, text: str, timeout: float = 25) -> Optional[tup
     return _parse_bounds(node.get("bounds", ""))
 
 
+# ---------- 元素选择器（控件树 / 多维定位） ----------
+
+# 支持的定位维度: text / id / desc / class / package / xpath
+SELECTOR_KINDS = ("text", "id", "desc", "class", "package", "xpath")
+
+_UIDUMP_REMOTE = "/data/local/tmp/narci_uidump.xml"
+
+
+def _node_attrs(node: ET.Element) -> dict:
+    return {
+        "text": node.get("text", "") or "",
+        "resource_id": node.get("resource-id", "") or "",
+        "class": node.get("class", "") or "",
+        "package": node.get("package", "") or "",
+        "content_desc": node.get("content-desc", "") or "",
+    }
+
+
+def _node_to_dict(node: ET.Element) -> dict:
+    attrs = _node_attrs(node)
+    bounds = node.get("bounds", "") or ""
+    return {
+        **attrs,
+        "id": attrs["resource_id"],
+        "desc": attrs["content_desc"],
+        "bounds": bounds,
+        "center": _parse_bounds(bounds),
+        "clickable": node.get("clickable") == "true",
+        "enabled": node.get("enabled") == "true",
+        "checked": node.get("checked") == "true",
+        "selected": node.get("selected") == "true",
+        "focused": node.get("focused") == "true",
+        "focusable": node.get("focusable") == "true",
+        "scrollable": node.get("scrollable") == "true",
+        "long_clickable": node.get("long-clickable") == "true",
+        "password": node.get("password") == "true",
+    }
+
+
+async def _dump_xml(serial: str, timeout: float = 25) -> Optional[ET.Element]:
+    """执行 uiautomator dump 并返回解析后的 XML 根节点（失败返回 None）。"""
+    await _run_ok(["shell", "uiautomator", "dump", _UIDUMP_REMOTE], device=serial, timeout=timeout)
+    rc, xml_text = await shell(serial, f"cat {_UIDUMP_REMOTE}", timeout=15)
+    try:
+        return ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+
+
+async def dump_hierarchy(serial: str, timeout: float = 25) -> list[dict]:
+    """返回当前界面的控件树（扁平节点列表，含属性与中心坐标）。"""
+    root = await _dump_xml(serial, timeout=timeout)
+    if root is None:
+        return []
+    return [_node_to_dict(n) for n in root.iter("node")]
+
+
+async def find_elements(serial: str, kind: str, value: str, contains: bool = False,
+                       timeout: float = 25) -> list[dict]:
+    """按维度查找控件。kind ∈ SELECTOR_KINDS；contains 为模糊包含匹配。"""
+    if kind not in SELECTOR_KINDS:
+        raise AdbError(f"不支持的定位维度: {kind}（可选 {', '.join(SELECTOR_KINDS)}）")
+    root = await _dump_xml(serial, timeout=timeout)
+    if root is None:
+        return []
+    out: list[dict] = []
+    if kind == "xpath":
+        try:
+            for node in root.findall(value):
+                out.append(_node_to_dict(node))
+        except ET.XPathError:
+            raise AdbError(f"XPath 表达式无效: {value}")
+        return out
+    # 定位维度 -> XML 属性名
+    attr_key = {"text": "text", "id": "resource-id", "desc": "content-desc",
+                "class": "class", "package": "package"}.get(kind)
+    if attr_key is None:
+        raise AdbError(f"不支持的定位维度: {kind}")
+    for node in root.iter("node"):
+        attr = node.get(attr_key, "") or ""
+        if (value in attr) if contains else (attr == value):
+            out.append(_node_to_dict(node))
+    return out
+
+
+async def find_element(serial: str, kind: str, value: str, contains: bool = False,
+                      index: int = 0, timeout: float = 25) -> Optional[dict]:
+    """查找第 index 个匹配控件（默认第 0 个），返回节点信息或 None。"""
+    els = await find_elements(serial, kind, value, contains=contains, timeout=timeout)
+    if not els or index < 0 or index >= len(els):
+        return None
+    return els[index]
+
+
+async def tap_element(serial: str, kind: str, value: str, contains: bool = False,
+                     index: int = 0, timeout: float = 25) -> dict:
+    """按选择器点击控件中心。"""
+    el = await find_element(serial, kind, value, contains=contains, index=index, timeout=timeout)
+    if el is None or el["center"] is None:
+        raise AdbError(f"未找到控件: {kind}={value}")
+    await input_tap(serial, el["center"][0], el["center"][1])
+    return el
+
+
+def parse_selector(spec: dict) -> tuple[str, str, bool, int]:
+    """把步骤里的选择器字典规整为 (kind, value, contains, index)。"""
+    if not isinstance(spec, dict):
+        raise AdbError("selector 必须是对象")
+    kind = str(spec.get("kind", "text")).strip()
+    value = str(spec.get("value", spec.get("text", ""))).strip()
+    if not value:
+        raise AdbError("selector 缺少 value")
+    contains = bool(spec.get("contains", spec.get("fuzzy", False)))
+    index = int(spec.get("index", 0) or 0)
+    return kind, value, contains, index
+
+
 async def list_apps(serial: str) -> list[str]:
     """列出第三方应用包名（pm list packages -3）。"""
     out = await _run_ok(["shell", "pm", "list", "packages", "-3"], device=serial, timeout=30)
@@ -498,3 +615,11 @@ async def get_metrics(serial: str) -> dict:
     return {"cpu_total_pct": cpu_total, "mem_total_kb": mem_total, "mem_free_kb": mem_free,
             "battery": battery}
 
+async def reverse_forward(serial: str, device_port: int, host_port: int) -> None:
+    """adb reverse: 设备上的 device_port 映射到 PC 的 host_port(设备可访问 PC 服务)。"""
+    await _run_ok(["reverse", f"tcp:{device_port}", f"tcp:{host_port}"], device=serial, timeout=15)
+
+
+async def remove_reverse_forward(serial: str, device_port: int) -> None:
+    with contextlib.suppress(Exception):
+        await _run(["reverse", "--remove", f"tcp:{device_port}"], device=serial, timeout=10)

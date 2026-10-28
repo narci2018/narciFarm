@@ -29,6 +29,7 @@ WRITABLE_DIR = _writable_base()
 
 DATA_DIR = Path(os.environ.get("NARCI_DATA_DIR", WRITABLE_DIR / "data"))
 CAPTURES_DIR = Path(os.environ.get("NARCI_CAPTURES_DIR", WRITABLE_DIR / "captures"))
+REPORTS_DIR = Path(os.environ.get("NARCI_REPORTS_DIR", WRITABLE_DIR / "reports"))
 UPLOADS_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "narci.db"
 

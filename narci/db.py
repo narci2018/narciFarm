@@ -15,6 +15,58 @@ _conn: Optional[sqlite3.Connection] = None
 
 _SCHEMA = """
 
+CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    name TEXT NOT NULL,
+    username TEXT DEFAULT '',
+    avatar_url TEXT DEFAULT '',
+    api_token TEXT DEFAULT '',
+    api_base TEXT DEFAULT '',
+    status TEXT DEFAULT 'active',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS account_bindings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    serial TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS contents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'text',
+    text TEXT DEFAULT '',
+    media_path TEXT DEFAULT '',
+    status TEXT DEFAULT 'ready',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS distribution_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    scheduled_at REAL NOT NULL,
+    status TEXT DEFAULT 'pending',
+    published_at REAL DEFAULT 0,
+    platform_post_id TEXT DEFAULT '',
+    error TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS account_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    followers INTEGER DEFAULT 0,
+    following INTEGER DEFAULT 0,
+    likes INTEGER DEFAULT 0,
+    comments INTEGER DEFAULT 0,
+    views INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS device_tags (
+    serial TEXT NOT NULL,
+    tag_key TEXT NOT NULL,
+    tag_value TEXT DEFAULT '',
+    PRIMARY KEY (serial, tag_key)
+);
+
 CREATE TABLE IF NOT EXISTS alert_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -657,4 +709,130 @@ def set_webhook(url: str, enabled: bool) -> None:
     execute("INSERT INTO webhook_config(id, url, enabled) VALUES(1,?,?) "
             "ON CONFLICT(id) DO UPDATE SET url=excluded.url, enabled=excluded.enabled",
             (url, 1 if enabled else 0))
+
+# ---------- 运营: 账号 / 内容 / 分发 / 指标 / 设备标签 ----------
+
+def create_account(platform: str, name: str, username: str = "", api_token: str = "",
+                   api_base: str = "", avatar_url: str = "") -> dict:
+    execute("INSERT INTO accounts(platform, name, username, api_token, api_base, avatar_url) "
+            "VALUES(?,?,?,?,?,?)", (platform, name, username, api_token, api_base, avatar_url))
+    return query_one("SELECT * FROM accounts ORDER BY id DESC LIMIT 1", ())
+
+
+def list_accounts() -> list[dict]:
+    return query("SELECT * FROM accounts ORDER BY id")
+
+
+def get_account(account_id: int) -> Optional[dict]:
+    return query_one("SELECT * FROM accounts WHERE id=?", (account_id,))
+
+
+def delete_account(account_id: int) -> None:
+    execute("DELETE FROM account_bindings WHERE account_id=?", (account_id,))
+    execute("DELETE FROM distribution_tasks WHERE account_id=?", (account_id,))
+    execute("DELETE FROM account_metrics WHERE account_id=?", (account_id,))
+    execute("DELETE FROM accounts WHERE id=?", (account_id,))
+
+
+def bind_account(account_id: int, serial: str) -> None:
+    execute("INSERT OR IGNORE INTO account_bindings(account_id, serial) VALUES(?,?)", (account_id, serial))
+
+
+def account_devices(account_id: int) -> list[str]:
+    return [r["serial"] for r in query("SELECT serial FROM account_bindings WHERE account_id=?", (account_id,))]
+
+
+def accounts_on_device(serial: str) -> list[dict]:
+    return query("SELECT a.* FROM accounts a JOIN account_bindings b ON b.account_id=a.id WHERE b.serial=?", (serial,))
+
+
+def create_content(title: str, type: str = "text", text: str = "", media_path: str = "") -> dict:
+    execute("INSERT INTO contents(title, type, text, media_path) VALUES(?,?,?,?)",
+            (title, type, text, media_path))
+    return query_one("SELECT * FROM contents ORDER BY id DESC LIMIT 1", ())
+
+
+def list_contents() -> list[dict]:
+    return query("SELECT * FROM contents ORDER BY id DESC")
+
+
+def delete_content(content_id: int) -> None:
+    execute("DELETE FROM distribution_tasks WHERE content_id=?", (content_id,))
+    execute("DELETE FROM contents WHERE id=?", (content_id,))
+
+
+def create_distribution_task(content_id: int, account_id: int, scheduled_at: float) -> dict:
+    import time
+    execute("INSERT INTO distribution_tasks(content_id, account_id, scheduled_at) VALUES(?,?,?)",
+            (content_id, account_id, scheduled_at))
+    return query_one("SELECT * FROM distribution_tasks ORDER BY id DESC LIMIT 1", ())
+
+
+def list_distribution_tasks(limit: int = 100) -> list[dict]:
+    rows = query("SELECT * FROM distribution_tasks ORDER BY scheduled_at DESC LIMIT ?", (limit,))
+    for r in rows:
+        c = query_one("SELECT * FROM contents WHERE id=?", (r["content_id"],))
+        a = get_account(r["account_id"])
+        r["content_title"] = c["title"] if c else ""
+        r["account_name"] = a["name"] if a else ""
+        r["platform"] = a["platform"] if a else ""
+    return rows
+
+
+def due_distribution_tasks(now: Optional[float] = None) -> list[dict]:
+    now = now or time.time()
+    return query("SELECT * FROM distribution_tasks WHERE status='pending' AND scheduled_at<=? "
+                 "ORDER BY scheduled_at LIMIT 50", (now,))
+
+
+def update_distribution_task(task_id: int, **fields) -> None:
+    allowed = {"status", "published_at", "platform_post_id", "error"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return
+    params.append(task_id)
+    execute(f"UPDATE distribution_tasks SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
+def record_metric(account_id: int, ts: float, followers: int = 0, following: int = 0,
+                  likes: int = 0, comments: int = 0, views: int = 0) -> None:
+    import time
+    execute("INSERT INTO account_metrics(account_id, ts, followers, following, likes, comments, views) "
+            "VALUES(?,?,?,?,?,?,?)", (account_id, ts, followers, following, likes, comments, views))
+
+
+def metrics_summary() -> dict:
+    accounts = query("SELECT a.id, a.name, a.platform, a.username, "
+                     "COALESCE(m.followers,0) AS followers, COALESCE(m.following,0) AS following, "
+                     "COALESCE(m.likes,0) AS likes, COALESCE(m.comments,0) AS comments, COALESCE(m.views,0) AS views "
+                     "FROM accounts a LEFT JOIN "
+                     "(SELECT account_id, MAX(ts) AS latest FROM account_metrics GROUP BY account_id) latest "
+                     "ON latest.account_id=a.id "
+                     "LEFT JOIN account_metrics m ON m.account_id=latest.account_id AND m.ts=latest.latest "
+                     "ORDER BY a.id")
+    history = query("SELECT ts, account_id, followers, likes, comments, views FROM account_metrics "
+                    "ORDER BY ts DESC LIMIT 200")
+    return {"accounts": accounts, "history": history}
+
+
+def set_device_tag(serial: str, key: str, value: str) -> None:
+    execute("INSERT INTO device_tags(serial, tag_key, tag_value) VALUES(?,?,?) "
+            "ON CONFLICT(serial, tag_key) DO UPDATE SET tag_value=excluded.tag_value",
+            (serial, key, value))
+
+
+def get_device_tags(serial: str) -> dict:
+    return {r["tag_key"]: r["tag_value"] for r in query(
+        "SELECT tag_key, tag_value FROM device_tags WHERE serial=?", (serial,))}
+
+
+def list_device_tags() -> dict:
+    out = {}
+    for r in query("SELECT * FROM device_tags"):
+        out.setdefault(r["serial"], {})[r["tag_key"]] = r["tag_value"]
+    return out
 

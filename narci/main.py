@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import adb, db, scenario, scheduler
+from . import adb, auth as _auth, db, reports, scenario, scheduler, vision
 from .config import (CAPTURES_DIR, DEVICE_REFRESH_INTERVAL, HOST, MAX_FPS,
                      MAX_SIZE, PORT, SNAPSHOT_INTERVAL, STATIC_DIR,
                      UPLOADS_DIR, VIDEO_BITRATE)
@@ -155,7 +155,7 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-__version__ = "0.5.0"
+__version__ = "0.9.6"
 app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 
@@ -560,7 +560,7 @@ async def api_run_scenario(scenario_id: int, body: dict):
         if not r.get("ok"):
             raise HTTPException(502, r.get("error", "Agent 场景执行失败"))
         return {"run_id": r.get("run_id"), "targets": targets, "remote": True}
-    run_id = await scenario.start_run(steps, repeat, local, body.get("vars"))
+    run_id = await scenario.start_run(steps, repeat, local, body.get("vars"), scenario_name=sc["name"])
     return {"run_id": run_id, "targets": targets}
 
 
@@ -576,6 +576,91 @@ async def api_abort_run(run_id: str):
     if not ok:
         raise HTTPException(404, "运行不存在或已结束")
     return {"ok": True}
+
+
+# ---------- 测试报告 ----------
+
+@app.get("/api/reports")
+async def api_reports(_=Depends(_auth.require_user)):
+    return reports.list_reports()
+
+
+@app.get("/api/reports/{report_id}.html")
+async def api_report_html(report_id: str, _=Depends(_auth.require_user)):
+    from fastapi.responses import HTMLResponse
+    rep = reports.load_report(report_id)
+    if rep is None:
+        raise HTTPException(404, "报告不存在")
+    return HTMLResponse(reports.render_html(rep))
+
+
+@app.get("/api/reports/{report_id}.xml")
+async def api_report_junit(report_id: str, _=Depends(_auth.require_user)):
+    from fastapi.responses import Response
+    rep = reports.load_report(report_id)
+    if rep is None:
+        raise HTTPException(404, "报告不存在")
+    return Response(reports.render_junit(rep), media_type="application/xml")
+
+
+@app.get("/api/reports/{report_id}")
+async def api_report(report_id: str, _=Depends(_auth.require_user)):
+    rep = reports.load_report(report_id)
+    if rep is None:
+        raise HTTPException(404, "报告不存在")
+    return rep
+
+
+@app.delete("/api/reports/{report_id}")
+async def api_delete_report(report_id: str, _=Depends(_auth.require_admin)):
+    if not reports.delete_report(report_id):
+        raise HTTPException(404, "报告不存在")
+    return {"ok": True}
+
+
+# ---------- 控件树 / 元素定位 ----------
+
+@app.get("/api/devices/{serial}/hierarchy")
+async def api_hierarchy(serial: str, _=Depends(_auth.require_user)):
+    nodes = await adb.dump_hierarchy(serial)
+    return {"serial": serial, "nodes": nodes, "count": len(nodes)}
+
+
+@app.get("/api/devices/{serial}/elements")
+async def api_find_elements(serial: str, kind: str = "text", value: str = "",
+                           contains: bool = False, _=Depends(_auth.require_user)):
+    try:
+        els = await adb.find_elements(serial, kind, value, contains=contains)
+    except adb.AdbError as e:
+        raise HTTPException(400, str(e))
+    return {"serial": serial, "kind": kind, "value": value, "count": len(els), "elements": els}
+
+
+@app.post("/api/devices/{serial}/ocr")
+async def api_device_ocr(serial: str, body: dict, _=Depends(_auth.require_user)):
+    """在设备上做 OCR，返回带边界框/置信度的识别结果。"""
+    target = body.get("target")
+    region = body.get("region")
+    if isinstance(region, (list, tuple)) and len(region) == 4:
+        region = tuple(int(v) for v in region)
+    else:
+        region = None
+    results = await vision.ocr_find_on_device(serial, target=target, region=region)
+    return {"serial": serial, "count": len(results), "matches": results}
+
+
+@app.post("/api/devices/{serial}/match-image")
+async def api_match_image(serial: str, body: dict, _=Depends(_auth.require_user)):
+    """在设备上做多结果/多尺度模板匹配（用于阈值与尺度调优）。"""
+    path = vision.resolve_template(str(body["image"]))
+    res = await vision.match_all_on_device(
+        serial, path,
+        float(body.get("threshold", 0.8)),
+        max_results=int(body.get("max_results", 1)),
+        region=body.get("region"),
+        scales=body.get("scales"),
+    )
+    return {"serial": serial, "count": len(res), "matches": res}
 
 
 # ---------- 调度 ----------
@@ -935,14 +1020,13 @@ async def api_template_preview(name: str):
 
 from fastapi.responses import JSONResponse
 
-from . import auth as _auth
 
 
 @app.middleware("http")
 async def auth_middleware(request, call_next):
     """保护 /api/*(登录除外); 用户注入 request.state.user。"""
     path = request.url.path
-    if path.startswith("/api/") and path not in ("/api/login", "/api/agents/heartbeat"):
+    if path.startswith("/api/") and path not in ("/api/login", "/api/version", "/api/agents/heartbeat"):
         user = _auth.user_from_token(_auth.extract_token(request))
         # 截图端点经 <img> 加载无法带 Header, 允许 ?token= 传参
         if not user and "/screenshot.png" in path:
@@ -1442,6 +1526,156 @@ async def api_set_webhook(body: dict, _=Depends(_auth.require_admin)):
 @app.post("/api/webhook/test")
 async def api_test_webhook(_=Depends(_auth.require_admin)):
     await _dispatch_webhook("narciFarm Webhook 测试消息")
+    return {"ok": True}
+
+
+
+
+# ---------- 运营: 账号 / 内容 / 分发 / 指标 / 设备标签 / 反向转发 ----------
+
+@app.get("/api/accounts")
+async def api_accounts(_=Depends(_auth.require_user)):
+    accounts = db.list_accounts()
+    for a in accounts:
+        a["devices"] = db.query("SELECT serial FROM account_bindings WHERE account_id=?", (a["id"],))
+        a["devices"] = [d["serial"] for d in a["devices"]]
+    return accounts
+
+
+@app.post("/api/accounts")
+async def api_create_account(body: dict, _=Depends(_auth.require_admin)):
+    platform = str(body.get("platform", "")).strip()
+    name = str(body.get("name", "")).strip()
+    if not platform or not name:
+        raise HTTPException(400, "平台和名称不能为空")
+    return db.create_account(platform, name, str(body.get("username", "")),
+                              str(body.get("api_token", "")), str(body.get("api_base", "")))
+
+
+@app.delete("/api/accounts/{account_id}")
+async def api_delete_account(account_id: int, _=Depends(_auth.require_admin)):
+    db.delete_account(account_id)
+    return {"ok": True}
+
+
+@app.post("/api/accounts/{account_id}/bind")
+async def api_bind_account(account_id: int, body: dict, _=Depends(_auth.require_user)):
+    db.bind_account(account_id, str(body.get("serial", "")))
+    return {"ok": True}
+
+
+@app.get("/api/contents")
+async def api_contents(_=Depends(_auth.require_user)):
+    return db.list_contents()
+
+
+@app.post("/api/contents")
+async def api_create_content(body: dict, _=Depends(_auth.require_user)):
+    title = str(body.get("title", "")).strip()
+    if not title:
+        raise HTTPException(400, "标题不能为空")
+    return db.create_content(title, str(body.get("type", "text")),
+                              str(body.get("text", "")), str(body.get("media_path", "")))
+
+
+@app.delete("/api/contents/{content_id}")
+async def api_delete_content(content_id: int, _=Depends(_auth.require_user)):
+    db.delete_content(content_id)
+    return {"ok": True}
+
+
+@app.post("/api/contents/upload")
+async def api_upload_content(file: UploadFile = File(...)):
+    data = await file.read()
+    if not file.filename.lower().endswith((".png", ".jpg", ".jpeg", ".mp4", ".mov", ".webm")):
+        raise HTTPException(400, "仅支持图片/视频")
+    dest = UPLOADS_DIR / file.filename
+    with open(dest, "wb") as f:
+        f.write(data)
+    return {"ok": True, "path": str(dest)}
+
+
+@app.get("/api/distribution-tasks")
+async def api_distribution_tasks(_=Depends(_auth.require_user)):
+    return db.list_distribution_tasks()
+
+
+@app.post("/api/distribution-tasks")
+async def api_create_distribution_task(body: dict, _=Depends(_auth.require_user)):
+    content_id = int(body.get("content_id", 0))
+    account_id = int(body.get("account_id", 0))
+    scheduled_at = float(body.get("scheduled_at", 0))
+    if not content_id or not account_id or not scheduled_at:
+        raise HTTPException(400, "内容、账号、时间不能为空")
+    return db.create_distribution_task(content_id, account_id, scheduled_at)
+
+
+@app.delete("/api/distribution-tasks/{task_id}")
+async def api_delete_distribution_task(task_id: int, _=Depends(_auth.require_user)):
+    with _lock:
+        db.execute("DELETE FROM distribution_tasks WHERE id=?", (task_id,))
+    return {"ok": True}
+
+
+@app.get("/api/metrics/summary")
+async def api_metrics_summary(_=Depends(_auth.require_user)):
+    return db.metrics_summary()
+
+
+@app.post("/api/metrics/ingest")
+async def api_metrics_ingest(body: dict):
+    """指标采集(可由外部系统推送)。"""
+    account_id = int(body.get("account_id", 0))
+    if not account_id:
+        raise HTTPException(400, "缺少 account_id")
+    db.record_metric(account_id, float(body.get("ts", time.time())),
+                      int(body.get("followers", 0)), int(body.get("following", 0)),
+                      int(body.get("likes", 0)), int(body.get("comments", 0)), int(body.get("views", 0)))
+    return {"ok": True}
+
+
+@app.post("/api/accounts/{account_id}/metrics")
+async def api_record_metric(account_id: int, body: dict, _=Depends(_auth.require_user)):
+    db.record_metric(account_id, float(body.get("ts", time.time())),
+                     int(body.get("followers", 0)), int(body.get("following", 0)),
+                     int(body.get("likes", 0)), int(body.get("comments", 0)), int(body.get("views", 0)))
+    return {"ok": True}
+
+
+@app.get("/api/device-tags")
+async def api_all_device_tags(_=Depends(_auth.require_user)):
+    """所有设备的标签汇总: {serial: {key: value}}。"""
+    return db.list_device_tags()
+
+
+@app.get("/api/devices/{serial}/tags")
+async def api_get_device_tags(serial: str, _=Depends(_auth.require_user)):
+    return db.get_device_tags(serial)
+
+
+@app.put("/api/devices/{serial}/tags")
+async def api_set_device_tags(serial: str, body: dict, _=Depends(_auth.require_user)):
+    for k, v in (body.get("tags") or {}).items():
+        db.set_device_tag(serial, k, str(v))
+    return {"ok": True}
+
+
+@app.post("/api/devices/{serial}/reverse")
+async def api_reverse_forward(serial: str, body: dict, _=Depends(_auth.require_user)):
+    """反向端口转发: 设备 device_port -> PC host_port。"""
+    device_port = int(body.get("device_port", 0))
+    host_port = int(body.get("host_port", 0))
+    if not device_port or not host_port:
+        raise HTTPException(400, "端口不能为空")
+    await adb.reverse_forward(serial, device_port, host_port)
+    return {"ok": True, "device_port": device_port, "host_port": host_port}
+
+
+@app.delete("/api/devices/{serial}/reverse")
+async def api_remove_reverse_forward(serial: str, body: dict, _=Depends(_auth.require_user)):
+    device_port = int(body.get("device_port", 0))
+    if device_port:
+        await adb.remove_reverse_forward(serial, device_port)
     return {"ok": True}
 
 

@@ -19,3 +19,11 @@ node_modules/
 
 # 上传缓存
 data/uploads/
+
+# 运行时报告与日志
+reports/
+logs/
+
+# 工具自身的工作目录（非项目文件）
+.freebuff/
+logs/
