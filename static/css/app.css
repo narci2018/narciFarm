@@ -2,6 +2,28 @@
   --bg: #0f1216; --panel: #171c23; --panel2: #1e252e; --line: #2a3340;
   --fg: #d8dee7; --dim: #7d8b9d; --acc: #4da3ff; --ok: #35c46f; --bad: #ff5d5d; --warn: #ffb84d;
 }
+/* 浅色主题(经典白) */
+[data-theme="light"] {
+  --bg: #f4f6f9; --panel: #ffffff; --panel2: #edf0f4; --line: #d9dee5;
+  --fg: #1b1f24; --dim: #6b7280; --acc: #2563eb; --ok: #16a34a; --bad: #dc2626; --warn: #d97706;
+}
+[data-theme="light"] .console-out { background: #10151b; color: #c8d3e0; }
+[data-theme="light"] .mm-loading { background: rgba(255,255,255,.94); }
+[data-theme="light"] .mm-loading .hint { color: var(--dim); }
+/* 自定义确认对话框 */
+.confirm-modal { position: fixed; inset: 0; background: rgba(10,12,16,.55); backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center; z-index: 300; }
+.confirm-modal.hidden { display: none; }
+.confirm-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  padding: 26px 28px; width: 400px; max-width: 90vw; box-shadow: 0 16px 60px rgba(0,0,0,.35);
+  animation: pop .18s ease-out; }
+@keyframes pop { from { transform: scale(.94); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.confirm-icon { font-size: 30px; text-align: center; margin-bottom: 10px; }
+.confirm-title { font-size: 17px; font-weight: 700; text-align: center; margin-bottom: 8px; }
+.confirm-msg { color: var(--dim); font-size: 13.5px; text-align: center; line-height: 1.6; margin-bottom: 20px; }
+.confirm-actions { display: flex; gap: 10px; justify-content: center; }
+.btn.danger-solid { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
+.btn.danger-solid:hover { filter: brightness(1.1); }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg);
   font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; }
@@ -184,3 +206,10 @@ html, body, .mirror-move, .device-list, .group-list, .console-out, .result-box,
   padding: 8px 12px; display: flex; gap: 10px; align-items: center;
   box-shadow: 0 4px 20px rgba(0,0,0,.5); }
 #mm-minimized-pill.hidden { display: none; }
+
+/* 服务已关闭页 */
+.shutdown-page { display: flex; height: 100vh; align-items: center; justify-content: center;
+  flex-direction: column; gap: 12px; background: var(--bg); color: var(--dim); }
+.shutdown-icon { font-size: 44px; color: var(--bad); }
+.shutdown-title { font-size: 18px; font-weight: 600; color: var(--fg); }
+.shutdown-sub { font-size: 13px; }

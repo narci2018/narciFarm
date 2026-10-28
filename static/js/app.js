@@ -42,6 +42,8 @@ async function init() {
   // 同步版本号（若服务端 __version__ 已更新则会自动生效）
   try { const v = await API.get('/api/version'); State.version = String(v.version || '?'); $('st-version').textContent = State.version; } catch (e) { $('st-version').textContent = '?'; }
 
+  applyTheme((function () { try { return localStorage.getItem('narciFarm.theme'); } catch (e) { return null; } })() || 'dark');
+  $('btn-theme').onclick = () => applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
   bindTabs();
   bindSidebar();
   bindOverview();
@@ -167,12 +169,18 @@ function bindOverview() {
     } catch (e) { toast(e.message, 'error'); }
   };
   $('btn-shutdown').onclick = async () => {
-    if (!confirm('确定关闭 narciFarm 服务？投屏会话与后台任务将一并停止。')) return;
+    const ok = await showConfirm({
+      title: '关闭服务', icon: '⏻',
+      message: '确定关闭 narciFarm 服务？投屏会话与后台任务将一并停止。',
+      okText: '确定关闭', danger: true,
+    });
+    if (!ok) return;
     try {
       await API.post('/api/shutdown');
-      document.body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;justify-content:center;' +
-        'color:#7d8b9d;font-size:16px;flex-direction:column;gap:10px">' +
-        '<div>服务已关闭，此页面不再可用。</div><div style="font-size:13px">如需再次使用，请重新运行 narciFarm.exe。</div></div>';
+      document.body.innerHTML = '<div class="shutdown-page">' +
+        '<div class="shutdown-icon">⏻</div>' +
+        '<div class="shutdown-title">服务已关闭</div>' +
+        '<div class="shutdown-sub">此页面不再可用。如需再次使用，请重新运行 narciFarm.exe。</div></div>';
     } catch (e) {
       toast(e.message.replace(/^\d+ /, ''), 'error', 6000);
     }
@@ -777,6 +785,37 @@ function bindModal() {
     if (e.key === 'Escape' && !$('mirror-modal').classList.contains('hidden')) {
       $('mm-close').click();
     }
+  });
+}
+
+
+/* ---------- 主题(默认深色科技风, 可切浅色) ---------- */
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem('narciFarm.theme', t); } catch (e) {}
+  const btn = $('btn-theme');
+  if (btn) {
+    btn.textContent = t === 'light' ? '☀️' : '🌙';
+    btn.title = t === 'light' ? '切换为深色主题' : '切换为浅色主题';
+  }
+}
+
+/* ---------- 自定义确认对话框(替代原生 confirm) ---------- */
+function showConfirm(opts) {
+  const { title = '确认操作', message = '', okText = '确定', cancelText = '取消', danger = false, icon = '⚠️' } = opts || {};
+  return new Promise((resolve) => {
+    const modal = $('confirm-modal');
+    $('confirm-icon').textContent = icon;
+    $('confirm-title').textContent = title;
+    $('confirm-msg').textContent = message;
+    $('confirm-ok').textContent = okText;
+    $('confirm-cancel').textContent = cancelText;
+    $('confirm-ok').className = 'btn ' + (danger ? 'danger-solid' : 'primary');
+    modal.classList.remove('hidden');
+    const done = (v) => { modal.classList.add('hidden'); resolve(v); };
+    $('confirm-ok').onclick = () => done(true);
+    $('confirm-cancel').onclick = () => done(false);
+    modal.onclick = (e) => { if (e.target === modal) done(false); };
   });
 }
 

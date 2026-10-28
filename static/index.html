@@ -23,6 +23,7 @@
            title="同意后会上报页面操作与回放（输入内容、日志文本已遮罩，设备画面不录制），用于改进体验">
       <input type="checkbox" id="an-consent"> 使用分析
     </label>
+    <button id="btn-theme" class="btn" title="切换为浅色主题">🌙</button>
     <button id="btn-shutdown" class="btn danger">关闭服务</button>
   </div>
 </header>
@@ -296,6 +297,19 @@
 </div>
 
 <div id="toasts" class="toasts"></div>
+
+<!-- 自定义确认对话框(替代原生 confirm) -->
+<div id="confirm-modal" class="confirm-modal hidden">
+  <div class="confirm-panel">
+    <div class="confirm-icon" id="confirm-icon">⚠️</div>
+    <div class="confirm-title" id="confirm-title">确认操作</div>
+    <div class="confirm-msg" id="confirm-msg"></div>
+    <div class="confirm-actions">
+      <button class="btn" id="confirm-cancel">取消</button>
+      <button class="btn danger-solid" id="confirm-ok">确定</button>
+    </div>
+  </div>
+</div>
 <!-- posthog-js 以 ES module 引入（无构建步骤）：importmap 把裸导入名指到本地 SDK 副本 -->
 <script type="importmap">
 {"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=043"}}
