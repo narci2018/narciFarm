@@ -15,6 +15,29 @@ _conn: Optional[sqlite3.Connection] = None
 
 _SCHEMA = """
 
+CREATE TABLE IF NOT EXISTS alert_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    threshold INTEGER DEFAULT 0,
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    serial TEXT NOT NULL,
+    level TEXT NOT NULL DEFAULT 'warn',
+    kind TEXT NOT NULL,
+    message TEXT DEFAULT '',
+    acked INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS webhook_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    url TEXT DEFAULT '',
+    enabled INTEGER DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS usage_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -585,4 +608,53 @@ def usage_summary() -> dict:
 def recent_usage(limit: int = 30) -> list[dict]:
     rows = query("SELECT * FROM usage_sessions ORDER BY started_at DESC LIMIT ?", (limit,))
     return [{**r, "started_at": r["started_at"]} for r in rows]
+
+# ---------- 监控告警 ----------
+
+def create_alert_rule(name: str, kind: str, threshold: int = 0) -> dict:
+    execute("INSERT INTO alert_rules(name, kind, threshold) VALUES(?,?,?)", (name, kind, int(threshold)))
+    return query_one("SELECT * FROM alert_rules ORDER BY id DESC LIMIT 1", ())
+
+
+def list_alert_rules() -> list[dict]:
+    return query("SELECT * FROM alert_rules ORDER BY id")
+
+
+def delete_alert_rule(rule_id: int) -> None:
+    execute("DELETE FROM alert_rules WHERE id=?", (rule_id,))
+
+
+def list_alerts(limit: int = 100, acked: Optional[bool] = None) -> list[dict]:
+    if acked is None:
+        return query("SELECT * FROM alerts ORDER BY ts DESC LIMIT ?", (limit,))
+    return query("SELECT * FROM alerts WHERE acked=? ORDER BY ts DESC LIMIT ?",
+                 (1 if acked else 0, limit))
+
+
+def create_alert(serial: str, level: str, kind: str, message: str) -> dict:
+    import time
+    execute("INSERT INTO alerts(ts, serial, level, kind, message) VALUES(?,?,?,?,?)",
+            (time.time(), serial, level, kind, message))
+    return query_one("SELECT * FROM alerts ORDER BY id DESC LIMIT 1", ())
+
+
+def ack_alert(alert_id: int) -> None:
+    execute("UPDATE alerts SET acked=1 WHERE id=?", (alert_id,))
+
+
+def recent_alerts_for(serial: str, kind: str, since: float) -> list[dict]:
+    """查询某设备某类型在最近 since 秒内是否已告警(用于静默)。"""
+    return query("SELECT * FROM alerts WHERE serial=? AND kind=? AND ts>=? AND acked=0",
+                 (serial, kind, since))
+
+
+def get_webhook() -> dict:
+    row = query_one("SELECT * FROM webhook_config WHERE id=1", ())
+    return row or {"url": "", "enabled": 0}
+
+
+def set_webhook(url: str, enabled: bool) -> None:
+    execute("INSERT INTO webhook_config(id, url, enabled) VALUES(1,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET url=excluded.url, enabled=excluded.enabled",
+            (url, 1 if enabled else 0))
 

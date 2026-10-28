@@ -70,6 +70,7 @@
       <button class="tab" data-tab="devtools">开发工具</button>
       <button class="tab hidden" data-tab="team" id="tab-team-btn">团队</button>
       <button class="tab" data-tab="stats">统计</button>
+      <button class="tab" data-tab="monitor">监控</button>
       <button class="tab" data-tab="captures">截图库</button>
       <button class="tab" data-tab="logs">日志</button>
     </nav>
@@ -248,6 +249,37 @@
           <button id="cs-run" class="btn primary">执行</button>
         </div>
         <pre id="cs-out" class="console-out"></pre>
+      </div>
+    </section>
+
+    <section id="tab-monitor" class="tabpane">
+      <div class="pane-card">
+        <div class="form-row"><h3 style="margin:0">设备健康</h3><button class="btn small" id="mon-refresh">刷新</button></div>
+        <div id="mon-devices" class="hint">加载中…</div>
+        <h4>告警规则</h4>
+        <div class="form-row">
+          <input id="ar-name" placeholder="规则名">
+          <select id="ar-kind">
+            <option value="battery_low">电量过低</option>
+            <option value="battery_temp_high">电池温度过高</option>
+            <option value="storage_low">存储不足</option>
+            <option value="memory_low">内存不足</option>
+            <option value="offline">设备离线</option>
+            <option value="unauthorized">未授权</option>
+          </select>
+          <input id="ar-threshold" type="number" placeholder="阈值" style="width:90px">
+          <button class="btn small" id="ar-add">添加</button>
+        </div>
+        <table class="data-table" id="ar-table"><thead><tr><th>ID</th><th>名称</th><th>类型</th><th>阈值</th><th>操作</th></tr></thead><tbody></tbody></table>
+        <h4>告警历史</h4>
+        <div id="al-list" class="result-box" style="max-height:200px"></div>
+        <h4>Webhook 通知</h4>
+        <div class="form-row">
+          <input id="wh-url" placeholder="https://qyapi.weixin.qq.com/... 或钉钉/飞书/custom" style="flex:1">
+          <label class="chk"><input type="checkbox" id="wh-enabled"> 启用</label>
+          <button class="btn small" id="wh-save">保存</button>
+          <button class="btn small" id="wh-test">测试</button>
+        </div>
       </div>
     </section>
 

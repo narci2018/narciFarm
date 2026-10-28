@@ -265,3 +265,8 @@ html, body, .mirror-move, .device-list, .group-list, .console-out, .result-box,
   body.printing .bar-fill { background: #2563eb; }
   body { background: #fff; }
 }
+
+/* 监控 */
+.health-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; margin: 6px 0; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.health-item { font-size: 13px; color: var(--fg); }

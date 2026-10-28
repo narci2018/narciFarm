@@ -64,6 +64,7 @@ async function init() {
   bindConsole();
   bindApps();
   bindDevTools();
+  bindMonitor();
   $('login-btn').onclick = doLogin;
   $('login-pass').onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
   $('btn-logout').onclick = doLogout;
@@ -340,6 +341,7 @@ function bindTabs() {
       if (tab.dataset.tab === 'scenario') loadTemplates();
       if (tab.dataset.tab === 'team') loadTeam();
       if (tab.dataset.tab === 'stats') loadStats();
+      if (tab.dataset.tab === 'monitor') loadMonitor();
       if (tab.dataset.tab === 'overview') loadMyBookings();
       if (tab.dataset.tab === 'schedule') refreshSchedules();
     };
@@ -1174,7 +1176,8 @@ function showMain() {
   $('tab-team-btn').classList.toggle('hidden', State.user.role !== 'admin');
   if (!State._inited) {
     State._inited = true;
-    init();
+    
+init();
   }
 }
 
@@ -1374,3 +1377,104 @@ async function loadStats() {
 init();
 
 initAuth();
+
+// ---------- 监控告警 ----------
+
+const ALERT_KIND_NAMES = {
+  offline: '设备离线', battery_low: '电量过低', battery_temp_high: '电池温度过高',
+  storage_low: '存储不足', memory_low: '内存不足', unauthorized: '未授权',
+};
+
+async function loadMonitor() {
+  loadHealth();
+  loadAlertRules();
+  loadAlerts();
+  loadWebhook();
+}
+
+async function loadHealth() {
+  try {
+    const list = await API.get('/api/health');
+    const box = $('mon-devices');
+    if (!list.length) { box.innerHTML = '<span class="hint">暂无设备</span>'; return; }
+    box.innerHTML = '';
+    for (const d of list) {
+      const h = d.health || {};
+      const card = document.createElement('div');
+      card.className = 'health-card';
+      const bat = h.battery_level >= 0 ? `${h.battery_level}%` : '—';
+      const temp = h.battery_temp >= 0 ? `${h.battery_temp}°C` : '—';
+      const sto = h.storage_free_mb >= 0 ? `${(h.storage_free_mb / 1024).toFixed(1)}GB` : '—';
+      const mem = h.mem_free_mb >= 0 ? `${(h.mem_free_mb / 1024).toFixed(1)}GB` : '—';
+      card.innerHTML = `<span class="dserial">${esc(d.serial)}</span>
+        <span class="health-item">🔋 ${bat}</span><span class="health-item">🌡 ${temp}</span>
+        <span class="health-item">💾 ${sto}</span><span class="health-item">🧠 ${mem}</span>`;
+      box.appendChild(card);
+    }
+  } catch (e) {}
+}
+
+async function loadAlertRules() {
+  try {
+    const rules = await API.get('/api/alert-rules');
+    const tb = $('ar-table').querySelector('tbody');
+    tb.innerHTML = rules.length ? '' : '<tr><td colspan="5" class="hint">暂无规则</td></tr>';
+    for (const r of rules) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${r.id}</td><td>${esc(r.name)}</td><td>${ALERT_KIND_NAMES[r.kind] || r.kind}</td>
+        <td>${r.threshold || '—'}</td><td><button class="btn small danger" data-del="${r.id}">删</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/alert-rules/${b.dataset.del}`);
+      loadAlertRules();
+    });
+  } catch (e) {}
+}
+
+async function loadAlerts() {
+  try {
+    const list = await API.get('/api/alerts?limit=50');
+    const box = $('al-list');
+    box.innerHTML = list.length ? '' : '<span class="hint">暂无告警</span>';
+    for (const a of list) {
+      const t = new Date(a.ts * 1000).toLocaleString('zh-CN', { hour12: false });
+      const div = document.createElement('div');
+      div.innerHTML = `[${t}] <b>${a.level === 'critical' ? '🔴' : '🟡'}</b> ${esc(a.message)}
+        <button class="btn small" data-ack="${a.id}">确认</button>`;
+      box.appendChild(div);
+    }
+    box.querySelectorAll('[data-ack]').forEach(b => b.onclick = async () => {
+      await API.post(`/api/alerts/${b.dataset.ack}/ack`);
+      loadAlerts();
+    });
+  } catch (e) {}
+}
+
+async function loadWebhook() {
+  try {
+    const cfg = await API.get('/api/webhook');
+    $('wh-url').value = cfg.url || '';
+    $('wh-enabled').checked = !!cfg.enabled;
+  } catch (e) {}
+}
+
+function bindMonitor() {
+  $('mon-refresh').onclick = loadHealth;
+  $('ar-add').onclick = async () => {
+    const name = $('ar-name').value.trim();
+    if (!name) return toast('请输入规则名', 'error');
+    await API.post('/api/alert-rules', { name, kind: $('ar-kind').value, threshold: parseInt($('ar-threshold').value) || 0 });
+    toast('规则已添加', 'ok');
+    loadAlertRules();
+  };
+  $('wh-save').onclick = async () => {
+    await API.put('/api/webhook', { url: $('wh-url').value.trim(), enabled: $('wh-enabled').checked });
+    toast('Webhook 已保存', 'ok');
+  };
+  $('wh-test').onclick = async () => {
+    await API.put('/api/webhook', { url: $('wh-url').value.trim(), enabled: $('wh-enabled').checked });
+    await API.post('/api/webhook/test');
+    toast('测试消息已发送', 'ok');
+  };
+}

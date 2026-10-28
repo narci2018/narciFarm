@@ -141,6 +141,7 @@ async def lifespan(app: FastAPI):
     else:
         _background.append(asyncio.create_task(_discovery_loop()))
         _background.append(asyncio.create_task(scheduler.scheduler_loop()))
+        _background.append(asyncio.create_task(_health_loop()))
     if not db.list_users():
         ph, salt = _auth.hash_password("admin")
         db.create_user("admin", ph, salt, "admin")
@@ -1248,6 +1249,200 @@ async def api_direct_token(serial: str, _=Depends(_auth.require_user)):
     exp = int(time.time()) + 60
     token = hmac.new(AGENT_SECRET.encode(), f"{serial}:{exp}".encode(), hashlib.sha256).hexdigest()[:24]
     return {"token": f"{token}:{exp}", "agent_url": agent["url"]}
+
+
+
+
+# ---------- 监控告警 ----------
+
+HEALTH_SILENCE_SEC = 1800  # 同设备同类型告警静默 30 分钟
+
+RULE_KINDS = {
+    "offline": "设备离线",
+    "battery_low": "电量过低",
+    "battery_temp_high": "电池温度过高",
+    "storage_low": "存储空间不足",
+    "memory_low": "内存不足",
+    "unauthorized": "未授权",
+}
+
+
+async def _check_device_health(serial: str) -> dict:
+    """采集单设备健康指标。"""
+    import re as _re
+    info = {}
+    try:
+        bat = (await adb.shell(serial, "dumpsys battery", timeout=15))[1]
+        lvl = _re.search(r"level:\s*(\d+)", bat)
+        tmp = _re.search(r"temperature:\s*(\d+)", bat)
+        st = _re.search(r"status:\s*(\d+)", bat)
+        info["battery_level"] = int(lvl.group(1)) if lvl else -1
+        info["battery_temp"] = int(tmp.group(1)) / 10.0 if tmp else -1.0  # 0.1°C -> °C
+        info["charging"] = st.group(1) if st else "0"
+    except Exception:
+        pass
+    try:
+        df = (await adb.shell(serial, "df /data", timeout=15))[1]
+        parts = df.splitlines()[-1].split() if df else []
+        if len(parts) >= 4:
+            # 列: [设备, 1K块, 已用, 可用, 使用率, 挂载点]
+            info["storage_total_mb"] = int(parts[1]) // 1024
+            info["storage_free_mb"] = int(parts[3]) // 1024
+    except Exception:
+        pass
+    try:
+        mem = (await adb.shell(serial, "cat /proc/meminfo", timeout=15))[1]
+        mt = _re.search(r"MemTotal:\s*(\d+)", mem)
+        mf = _re.search(r"MemAvailable:\s*(\d+)", mem)
+        if mt:
+            info["mem_total_mb"] = int(mt.group(1)) // 1024
+        if mf:
+            info["mem_free_mb"] = int(mf.group(1)) // 1024
+    except Exception:
+        pass
+    return info
+
+
+async def _dispatch_webhook(message: str) -> None:
+    cfg = db.get_webhook()
+    if not cfg.get("enabled") or not cfg.get("url"):
+        return
+    url = cfg["url"]
+    low = url.lower()
+    if "qyapi.weixin" in low or "weixin" in low:      # 企业微信
+        payload = {"msgtype": "text", "text": {"content": message}}
+    elif "dingtalk" in low:                             # 钉钉
+        payload = {"msgtype": "text", "text": {"content": message}}
+    elif "feishu" in low or "larksuite" in low:         # 飞书
+        payload = {"msgtype": "text", "content": {"text": message}}
+    else:                                               # 通用
+        payload = {"text": message}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(url, json=payload)
+    except Exception as e:
+        bus.warn(f"Webhook 发送失败: {type(e).__name__}: {e}")
+
+
+async def _evaluate_rules(serial: str, health: dict, state: str) -> None:
+    now = time.time()
+    for rule in db.list_alert_rules():
+        if not rule["enabled"]:
+            continue
+        kind = rule["kind"]
+        threshold = int(rule.get("threshold") or 0)
+        triggered = False
+        level = "warn"
+        msg = ""
+        if kind == "offline" and state != "device":
+            triggered, level = True, "critical"
+            msg = f"设备离线 ({serial})"
+        elif kind == "unauthorized" and state == "unauthorized":
+            triggered, level = True, "critical"
+            msg = f"设备未授权 ({serial})"
+        elif kind == "battery_low" and 0 <= health.get("battery_level", -1) < (threshold or 20):
+            triggered = True
+            msg = f"电量过低 {health['battery_level']}% < {threshold or 20}% ({serial})"
+        elif kind == "battery_temp_high" and health.get("battery_temp", -1) > (threshold or 45):
+            triggered = True
+            msg = f"电池温度过高 {health['battery_temp']}°C > {threshold or 45}°C ({serial})"
+        elif kind == "storage_low" and 0 <= health.get("storage_free_mb", -1) < (threshold or 1024):
+            triggered = True
+            msg = f"存储不足 剩余 {health['storage_free_mb']}MB < {threshold or 1024}MB ({serial})"
+        elif kind == "memory_low" and 0 <= health.get("mem_free_mb", -1) < (threshold or 512):
+            triggered = True
+            msg = f"内存不足 可用 {health['mem_free_mb']}MB < {threshold or 512}MB ({serial})"
+        if not triggered:
+            continue
+        # 静默: 同设备同类型 30 分钟内不重复告警
+        if db.recent_alerts_for(serial, kind, now - HEALTH_SILENCE_SEC):
+            continue
+        db.create_alert(serial, level, kind, msg)
+        bus.warn(f"告警[{level}] {msg}")
+        asyncio.create_task(_dispatch_webhook(f"[narciFarm] {msg}"))
+
+
+async def _health_loop() -> None:
+    bus.info("健康监控已启动")
+    while True:
+        try:
+            devices = await adb.list_devices()
+            for d in devices:
+                serial = d["serial"]
+                if d["state"] != "device":
+                    await _evaluate_rules(serial, {}, d["state"])
+                    continue
+                health = await _check_device_health(serial)
+                db_cache_health(serial, health)
+                await _evaluate_rules(serial, health, d["state"])
+        except Exception as e:
+            bus.error(f"健康检查异常: {type(e).__name__}: {e}")
+        await asyncio.sleep(30)
+
+
+def db_cache_health(serial: str, health: dict) -> None:
+    _health_cache[serial] = (time.time(), health)
+
+
+_health_cache: dict[str, tuple[float, dict]] = {}
+
+
+@app.get("/api/health")
+async def api_health(_=Depends(_auth.require_user)):
+    out = []
+    for d in db.list_devices(include_disabled=False):
+        cached = _health_cache.get(d["serial"])
+        out.append({"serial": d["serial"], "model": d["model"], "health": cached[1] if cached else None,
+                    "checked_at": cached[0] if cached else 0})
+    return out
+
+
+@app.get("/api/alert-rules")
+async def api_alert_rules(_=Depends(_auth.require_admin)):
+    return db.list_alert_rules()
+
+
+@app.post("/api/alert-rules")
+async def api_create_alert_rule(body: dict, _=Depends(_auth.require_admin)):
+    name = str(body.get("name", "")).strip()
+    kind = str(body.get("kind", ""))
+    if not name or kind not in RULE_KINDS:
+        raise HTTPException(400, f"非法规则: {kind}")
+    return db.create_alert_rule(name, kind, int(body.get("threshold", 0)))
+
+
+@app.delete("/api/alert-rules/{rule_id}")
+async def api_delete_alert_rule(rule_id: int, _=Depends(_auth.require_admin)):
+    db.delete_alert_rule(rule_id)
+    return {"ok": True}
+
+
+@app.get("/api/alerts")
+async def api_alerts(limit: int = 100, acked: bool = False, _=Depends(_auth.require_user)):
+    return db.list_alerts(limit, acked or None)
+
+
+@app.post("/api/alerts/{alert_id}/ack")
+async def api_ack_alert(alert_id: int, _=Depends(_auth.require_user)):
+    db.ack_alert(alert_id)
+    return {"ok": True}
+
+
+@app.get("/api/webhook")
+async def api_get_webhook(_=Depends(_auth.require_admin)):
+    return db.get_webhook()
+
+
+@app.put("/api/webhook")
+async def api_set_webhook(body: dict, _=Depends(_auth.require_admin)):
+    db.set_webhook(str(body.get("url", "")), bool(body.get("enabled")))
+    return {"ok": True}
+
+
+@app.post("/api/webhook/test")
+async def api_test_webhook(_=Depends(_auth.require_admin)):
+    await _dispatch_webhook("narciFarm Webhook 测试消息")
+    return {"ok": True}
 
 
 @app.get("/metrics")
