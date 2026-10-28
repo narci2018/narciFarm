@@ -307,37 +307,47 @@ class Mirror {
     const startGesture = (nx, ny) => {
       this._gesture = { x0: nx, y0: ny, t0: performance.now(), moved: false };
     };
-    // PointerEvent 优先；同时常备鼠标兜底（带去重），覆盖不支持/异常的浏览器环境
+    const moveGesture = (e) => {
+      if (!this._gesture) return;
+      const { nx, ny } = this._norm(e);
+      if (Math.hypot(nx - this._gesture.x0, ny - this._gesture.y0) > 0.012) this._gesture.moved = true;
+      this._gesture.x1 = nx; this._gesture.y1 = ny;
+    };
+
+    // PointerEvent 优先(含移动追踪, 拖拽=滑动); 不支持的环境回退鼠标路径。两路径互斥, 避免双重手势。
     if ('PointerEvent' in window) {
       cv.addEventListener('pointerdown', (e) => {
         if (this.fallback) return;
-        // 部分环境 setPointerCapture 会抛错：绝不能因此丢弃整个手势
-        try { cv.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 捕获失败不丢弃手势 */ }
         const { nx, ny } = this._norm(e);
         startGesture(nx, ny);
         Diag.press('pointer');
       });
+      cv.addEventListener('pointermove', moveGesture);
+      cv.addEventListener('pointerup', (e) => {
+        if (!this._gesture) return;
+        this._endGesture(e);
+      });
       cv.addEventListener('pointercancel', () => { this._gesture = null; });
+    } else {
+      cv.addEventListener('mousedown', (e) => {
+        if (this.fallback) return;
+        const { nx, ny } = this._norm(e);
+        startGesture(nx, ny);
+        Diag.press('mouse');
+      });
+      cv.addEventListener('mousemove', moveGesture);
+      cv.addEventListener('mouseup', (e) => {
+        if (!this._gesture) return;
+        this._endGesture(e);
+      });
     }
-    cv.addEventListener('mousedown', (e) => {
-      if (this.fallback) return;
-      if (Date.now() - (this._pointerHandledAt || 0) < 300) return; // 同一次点击已被 Pointer 路径处理
-      const { nx, ny } = this._norm(e);
-      startGesture(nx, ny);
-      Diag.press('mouse');
-    });
-    cv.addEventListener('mouseup', (e) => {
-      if (!this._gesture) return;
-      if (Date.now() - (this._pointerHandledAt || 0) < 300) return;
-      this._endGesture(e);
-    });
-    cv.addEventListener('pointerup', (e) => {
-      if (!this._gesture) return;
-      this._pointerHandledAt = Date.now();
-      this._endGesture(e);
-    });
     cv.addEventListener('wheel', (e) => {
       e.preventDefault();
+      // 节流: 一次滚动只发一条 swipe（高频率 wheel 事件会刷屏）
+      const now = performance.now();
+      if (now - (this._lastWheelAt || 0) < 350) return;
+      this._lastWheelAt = now;
       const { nx, ny } = this._norm(e);
       const dir = e.deltaY < 0 ? -1 : 1;   // 上滚 = 内容上移
       const dy = dir * 0.18;
@@ -348,7 +358,6 @@ class Mirror {
       });
     }, { passive: false });
   }
-
   _endGesture(e) {
     const g = this._gesture; this._gesture = null;
     const { nx, ny } = this._norm(e);
