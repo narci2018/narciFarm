@@ -36,6 +36,8 @@ STATIC_DIR = BASE_DIR / "static"
 ASSETS_DIR = BASE_DIR / "assets"
 SERVER_JAR = Path(os.environ.get("NARCI_SERVER_JAR", ASSETS_DIR / "scrcpy-server.jar"))
 SERVER_VERSION = os.environ.get("NARCI_SERVER_VERSION", "5.0.1")
+# 分布式 Agent 共享密钥: 设置后, Agent 注册/命令必须携带正确密钥, 否则拒绝
+AGENT_SECRET = os.environ.get("NARCI_AGENT_SECRET", "").strip()
 REMOTE_JAR_PATH = os.environ.get("NARCI_REMOTE_JAR", "/data/local/tmp/narci_scrcpy_server.jar")
 
 

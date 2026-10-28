@@ -13,7 +13,7 @@ from contextlib import suppress
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from . import adb
@@ -155,6 +155,15 @@ def _dispatch_command(cmd: str, params: dict):
     return asyncio.run(_run())
 
 
+def _check_secret(request) -> None:
+    """校验共享密钥(配置后生效)。支持 Header 或 WS query 传参。"""
+    if not AGENT_SECRET:
+        return
+    got = request.headers.get("X-Narci-Secret", "") or request.query_params.get("secret", "")
+    if got != AGENT_SECRET:
+        raise HTTPException(401, "Agent 密钥错误")
+
+
 def create_agent_app() -> FastAPI:
     from contextlib import asynccontextmanager
 
@@ -170,7 +179,8 @@ def create_agent_app() -> FastAPI:
         return {"agent_id": AGENT_ID, "name": AGENT_NAME, "devices": await _fetch_devices()}
 
     @app.post("/agent/command")
-    async def agent_command(body: dict):
+    async def agent_command(body: dict, request: Request):
+        _check_secret(request)
         try:
             result = await asyncio.get_event_loop().run_in_executor(None, _dispatch_command,
                                                                     body.get("cmd", ""), body.get("params", {}))
@@ -180,6 +190,7 @@ def create_agent_app() -> FastAPI:
 
     @app.websocket("/agent/mirror/{serial}")
     async def agent_mirror(ws: WebSocket, serial: str):
+        _check_secret(ws)
         await ws.accept()
         client = await hub.acquire(serial, control=True)
         queue = hub.subscribe(serial)

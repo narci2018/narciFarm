@@ -1106,6 +1106,10 @@ async def api_agent_heartbeat(body: dict):
     agent_id = str(body.get("agent_id", "")).strip()
     if not agent_id:
         raise HTTPException(400, "缺少 agent_id")
+    from .config import AGENT_SECRET
+    if AGENT_SECRET and str(body.get("secret", "")) != AGENT_SECRET:
+        bus.warn(f"Agent 注册密钥错误: {agent_id}")
+        raise HTTPException(401, "Agent 密钥错误")
     db.upsert_agent(agent_id, str(body.get("name", agent_id)),
                     str(body.get("url", "")), str(body.get("secret", "")))
     db.upsert_remote_devices(agent_id, body.get("devices", []))
@@ -1132,9 +1136,12 @@ async def _proxy_to_agent(serial: str, cmd: str, params: dict) -> dict:
     agent = db.agent_of(serial)
     if not agent:
         raise HTTPException(404, "设备不在线或未注册")
+    from .config import AGENT_SECRET
     url = agent["url"].rstrip("/")
+    headers = {"X-Narci-Secret": AGENT_SECRET} if AGENT_SECRET else {}
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(f"{url}/agent/command", json={"cmd": cmd, "params": {**params, "serial": serial}})
+        r = await client.post(f"{url}/agent/command", json={"cmd": cmd, "params": {**params, "serial": serial}},
+                               headers=headers)
         return r.json()
 
 
@@ -1146,11 +1153,14 @@ def _split_local_remote(serials: list[str]) -> tuple[list, list]:
 async def _proxy_mirror(ws: WebSocket, serial: str, agent: dict, quality: str) -> None:
     """远程投屏: 浏览器 ← 中心 ← Agent WS 中继。"""
     import websockets
+    from .config import AGENT_SECRET
     raw = agent["url"].rstrip("/")
     ws_url = ("wss://" + raw[len("https://"):]) if raw.startswith("https://") else              ("ws://" + raw[len("http://"):]) if raw.startswith("http://") else raw
     url = ws_url + f"/agent/mirror/{serial}"
     try:
-        async with websockets.connect(url) as agent_ws:
+        import websockets
+        extra_headers = {"X-Narci-Secret": AGENT_SECRET} if AGENT_SECRET else None
+        async with websockets.connect(url, extra_headers=extra_headers) as agent_ws:
             async def _to_browser():
                 async for msg in agent_ws:
                     if isinstance(msg, str):
