@@ -18,7 +18,8 @@ STEP_TYPES = {"tap", "swipe", "text", "key", "back", "home", "launch", "stop_app
               "wait_text", "assert_text", "rand_wait", "start_activity",
               "tap_image", "wait_image", "assert_image", "find_image",
               "ocr_tap", "ocr_get", "ocr_find",
-              "tap_el", "wait_el", "assert_el", "swipe_el", "assert_value"}
+              "tap_el", "wait_el", "assert_el", "swipe_el", "assert_value",
+              "reboot", "locate", "airplane", "lock", "unlock"}
 
 _runs: dict[str, dict] = {}
 _lock = asyncio.Lock()
@@ -233,6 +234,23 @@ async def _execute_step(step: dict, serial: str, size: tuple[int, int],
         ms = random.uniform(lo, hi)
         await asyncio.sleep(ms / 1000.0)
         return {"ms": round(ms)}
+    if stype == "reboot":
+        wait_boot = bool(step.get("wait", False))
+        await adb.reboot_device(serial, wait=wait_boot)
+        return {"rebooted": True, "wait_boot": wait_boot}
+    if stype == "locate":
+        await adb.locate_device(serial)
+        return {"located": True}
+    if stype == "airplane":
+        on = bool(step.get("on", True))
+        await adb.set_airplane_mode(serial, on)
+        return {"airplane": on}
+    if stype == "lock":
+        await adb.lock_device(serial)
+        return {}
+    if stype == "unlock":
+        await adb.unlock_device(serial)
+        return {}
     if stype == "start_activity":
         comp = str(step["component"])
         await adb.start_activity(serial, comp)

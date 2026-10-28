@@ -556,6 +556,98 @@ def parse_selector(spec: dict) -> tuple[str, str, bool, int]:
     return kind, value, contains, index
 
 
+# ---------- 网络代理（弱网模拟） ----------
+
+async def set_global_proxy(serial: str, host: str, port: int) -> None:
+    """把设备全局 HTTP 代理指向本机代理（用于弱网模拟）。"""
+    await _run_ok(["shell", f"settings put global http_proxy {host}:{port}"],
+                  device=serial, timeout=15)
+
+
+async def clear_global_proxy(serial: str) -> None:
+    """清除设备全局 HTTP 代理。"""
+    await _run_ok(["shell", "settings put global http_proxy :0"], device=serial, timeout=15)
+
+
+async def get_global_proxy(serial: str) -> str:
+    """读取设备当前全局代理设置。"""
+    rc, out = await shell(serial, "settings get global http_proxy", timeout=15)
+    return (out or "").strip()
+
+
+# ---------- 设备快捷操作 ----------
+
+async def reboot_device(serial: str, wait: bool = False) -> None:
+    """重启设备。wait=True 时阻塞直到设备重新上线（用于场景里重启后继续）。"""
+    with contextlib.suppress(AdbError):
+        await _run(["reboot"], device=serial, timeout=15)
+    if wait:
+        for _ in range(60):
+            await asyncio.sleep(3)
+            try:
+                await _run_ok(["shell", "echo ok"], device=serial, timeout=10)
+                return
+            except AdbError:
+                continue
+
+
+async def power_off(serial: str) -> None:
+    """关机。"""
+    with contextlib.suppress(AdbError):
+        await _run(["shell", "reboot -p"], device=serial, timeout=15)
+
+
+async def set_airplane_mode(serial: str, on: bool) -> None:
+    """开关飞行模式（部分厂商机型需要 root 或不同指令，失败时抛 AdbError）。"""
+    state = "1" if on else "0"
+    await _run_ok(["shell", f"settings put global airplane_mode_on {state}"],
+                  device=serial, timeout=15)
+    # 广播通知系统状态已变更
+    with contextlib.suppress(AdbError):
+        await _run_ok(["shell", "am broadcast -a android.intent.action.AIRPLANE_MODE --ez state "
+                                + ("true" if on else "false") + " >/dev/null"],
+                      device=serial, timeout=15)
+
+
+async def kill_process(serial: str, package: str) -> bool:
+    """强制结束指定应用进程。返回是否成功。"""
+    try:
+        await _run_ok(["shell", f"am force-stop {shlex.quote(package)}"], device=serial, timeout=20)
+        return True
+    except AdbError:
+        return False
+
+
+async def clear_app_data(serial: str, package: str) -> bool:
+    """清除应用数据（等价于用户点「清除数据」）。"""
+    try:
+        out = await _run_ok(["shell", f"pm clear {shlex.quote(package)}"], device=serial, timeout=30)
+        return b"Success" in out or b"success" in out
+    except AdbError:
+        return False
+
+
+async def lock_device(serial: str) -> None:
+    """锁定屏幕。"""
+    await _run_ok(["shell", "input keyevent 26"], device=serial, timeout=15)
+
+
+async def unlock_device(serial: str) -> bool:
+    """唤醒并尝试滑动解锁（仅限无密码锁屏）。"""
+    await wake_up(serial)
+    await input_keyevent(serial, 82)
+    return True
+
+
+async def locate_device(serial: str) -> None:
+    """物理找机：唤醒 + 最大亮度 + 亮屏，便于在机架上定位。"""
+    await wake_up(serial)
+    await _run_ok(["shell", "settings put system screen_brightness 255"], device=serial, timeout=15)
+    await _run_ok(["shell", "settings put system screen_brightness_mode 0"], device=serial, timeout=15)
+    with contextlib.suppress(AdbError):
+        await _run_ok(["shell", "input keyevent 82"], device=serial, timeout=15)
+
+
 async def read_metrics(serial: str) -> dict:
     """采集设备性能指标：电量/温度/内存/CPU。单个字段失败时省略而非报错。
 

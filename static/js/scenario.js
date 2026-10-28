@@ -15,6 +15,10 @@ const STEP_FIELDS = {
   wait_text: [['text', '等待出现的文本'], ['timeout_ms', '超时ms'], ['interval_ms', '轮询间隔ms']],
   assert_text: [['text', '文本'], ['expect', 'exists(须存在) / absent(须不存在)'],
                  ['match', '匹配模式 exact/contains/regex/startswith/endswith']],
+  reboot: [['wait', '重启后等待上线 1/0']],
+  locate: [],
+  airplane: [['on', '开飞行模式 1/0']],
+  lock: [], unlock: [],
   assert_value: [['actual', '实际值(支持 {{变量}})'], ['expected', '期望值'],
                  ['op', '比较符 eq/ne/gt/gte/lt/lte/contains/regex']],
   rand_wait: [['min_ms', '最小ms'], ['max_ms', '最大ms']],
@@ -174,6 +178,8 @@ const ScenarioEditor = {
       if (type === 'swipe_el') step.duration_ms = 300;
     }
     if (type === 'assert_value') { step.actual = ''; step.expected = ''; step.op = 'eq'; }
+    if (type === 'airplane') step.on = true;
+    if (type === 'reboot') step.wait = true;
     if (type === 'ocr_tap') step.text = '';
     if (type === 'ocr_find') step.text = '';
     if (type === 'find_image') { step.image = ''; step.threshold = 0.8; step.max_results = 1; }

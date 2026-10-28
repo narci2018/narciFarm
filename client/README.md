@@ -58,6 +58,8 @@ with Client("http://127.0.0.1:8555") as c:
 | `wait_finished(run_id)` / `wait_report(run_id)` | 等待结束 / 取回报告 |
 | `reports()` / `report(id)` / `report_html(id)` / `report_junit(id)` | 报告列表与导出 |
 | `plugins()` | 已注册的步骤插件 |
+| `batch_actions()` / `batch_action(action, targets, package)` | 批量快捷操作（重启/飞行模式/找机/清数据） |
+| `netlimit_status()` / `netlimit_start(...)` / `netlimit_stop(targets)` | 弱网模拟（带宽/延迟/丢包） |
 
 ## CI 集成示例
 
@@ -72,6 +74,20 @@ def test_regression():
         run_id = c.run_scenario([{"type": "wait", "ms": 500}], targets)
         report = c.wait_report(run_id, timeout=300)
         assert report["status"] == "passed", report
+```
+
+## 弱网模拟示例
+
+```python
+from narcifarm import Client
+
+with Client("http://127.0.0.1:8555") as c:
+    c.login("admin", "admin")
+    targets = [d["serial"] for d in c.devices() if d["state"] == "device"]
+    # 500 kbps + 200ms 延迟 + 5% 丢包
+    print(c.netlimit_start(targets, rate_kbps=500, latency_ms=200, loss_pct=5))
+    # ... 跑场景 ...
+    print(c.netlimit_stop(targets))
 ```
 
 ## 说明

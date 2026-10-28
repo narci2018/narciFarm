@@ -396,6 +396,64 @@ async function runBroadcast(url, body) {
 
 // ---------- 批量操作 ----------
 
+async function runBatchAction(action) {
+  const targets = window.appSelectedDevices();
+  if (!targets.length) return toast('请先勾选目标设备', 'error');
+  const paramEl = $('batch-param');
+  const needsParam = action === 'kill_app' || action === 'clear_data';
+  if (needsParam && !(paramEl.value || '').trim()) {
+    return toast('请填写包名', 'error');
+  }
+  const danger = action === 'power_off' || action === 'clear_data' || action === 'reboot';
+  const label = { reboot: '重启', power_off: '关机', clear_data: '清除数据' }[action] || action;
+  if (danger && !await showConfirm({
+    title: '确认操作', message: `将对 ${targets.length} 台设备执行「${label}」，确定继续？`,
+    okText: '执行', danger: true,
+  })) return;
+  const box = $('batch-action-result');
+  box.textContent = '执行中…';
+  try {
+    const r = await API.post('/api/batch/action', {
+      action, targets, package: paramEl.value.trim(),
+    });
+    const ok = Object.values(r.results).filter(x => x.ok).length;
+    const fail = Object.values(r.results).filter(x => !x.ok).length;
+    box.textContent = `${action}: 成功 ${ok} 台` + (fail ? `，失败 ${fail} 台` : '') +
+      '\n' + JSON.stringify(r.results, null, 2);
+    toast(`批量操作完成：成功 ${ok} / 失败 ${fail}`, fail ? 'error' : 'ok');
+  } catch (e) {
+    box.textContent = e.message;
+    toast(e.message, 'error');
+  }
+}
+
+async function runNetLimit(start) {
+  const targets = window.appSelectedDevices();
+  if (!targets.length) return toast('请先勾选目标设备', 'error');
+  const box = $('nl-result');
+  box.textContent = start ? '开启中…' : '关闭中…';
+  try {
+    const payload = { targets };
+    if (start) {
+      payload.rate_kbps = parseFloat($('nl-rate').value) || 500;
+      payload.latency_ms = parseInt($('nl-latency').value) || 0;
+      payload.loss_pct = parseFloat($('nl-loss').value) || 0;
+      if ($('nl-host').value.trim()) payload.host = $('nl-host').value.trim();
+    }
+    const r = await API.post(start ? '/api/netlimit/start' : '/api/netlimit/stop', payload);
+    if (start) {
+      $('nl-status').textContent = `已开启：${r.proxy} · ${r.rate_kbps}kbps · ${r.latency_ms}ms · ${r.loss_pct}%`;
+      box.textContent = `已对 ${r.applied.length} 台设备开启弱网${r.skipped.length ? '（跳过 ' + r.skipped.length + ' 台离线）' : ''}`;
+    } else {
+      $('nl-status').textContent = '未开启';
+      box.textContent = `已关闭 ${r.cleared.length} 台设备的代理`;
+    }
+  } catch (e) {
+    box.textContent = e.message;
+    toast(e.message, 'error');
+  }
+}
+
 function bindBatch() {
   $('batch-install').onclick = async () => {
     const f = $('batch-apk').files[0];
@@ -445,6 +503,11 @@ function bindBatch() {
       } catch (e) { box.textContent += `\n[${s}] 失败: ${e.message}`; }
     }));
   };
+  $('nl-start').onclick = () => runNetLimit(true);
+  $('nl-stop').onclick = () => runNetLimit(false);
+  document.querySelectorAll('#batch-actions [data-act], [data-act="kill_app"], [data-act="clear_data"]').forEach(btn => {
+    btn.onclick = () => runBatchAction(btn.dataset.act);
+  });
   $('batch-shot').onclick = async () => {
     const serials = window.appSelectedDevices();
     if (!serials.length) return toast('请先勾选设备', 'error');

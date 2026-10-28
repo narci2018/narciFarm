@@ -154,6 +154,43 @@
           <span class="hint">保存到服务端 captures 目录，可在「截图库」查看</span>
         </div>
       </div>
+      <div class="pane-card">
+        <h3>设备快捷操作</h3>
+        <div class="hint">对选中设备执行运维动作。<b>重启</b>会断开 adb 连接直至设备重新上线；<b>找机</b>会唤醒并拉满亮度，便于在机架上定位。</div>
+        <div class="form-row" id="batch-actions">
+          <button class="btn small" data-act="locate">找机（亮屏）</button>
+          <button class="btn small" data-act="lock">锁屏</button>
+          <button class="btn small" data-act="unlock">解锁</button>
+          <button class="btn small" data-act="airplane_on">开飞行模式</button>
+          <button class="btn small" data-act="airplane_off">关飞行模式</button>
+          <button class="btn small" data-act="reboot">重启</button>
+          <button class="btn small" data-act="power_off">关机</button>
+          <button class="btn small" data-act="stay_awake">保持唤醒</button>
+        </div>
+        <div class="form-row">
+          <input id="batch-param" placeholder="包名（用于结束应用 / 清除数据）" style="width:260px">
+          <button class="btn small" data-act="kill_app">结束应用</button>
+          <button class="btn small danger" data-act="clear_data">清除数据</button>
+        </div>
+        <div id="batch-action-result" class="result-box"></div>
+      </div>
+      <div class="pane-card">
+        <h3>弱网模拟</h3>
+        <div class="hint">把选中设备的全局 HTTP 代理指向本机节流代理，模拟窄带/高延迟/丢包。只影响经过代理的流量，随时可关闭。</div>
+        <div class="form-row">
+          <label>带宽 kbps</label><input id="nl-rate" type="number" value="500" min="1" class="num" style="width:90px">
+          <label>延迟 ms</label><input id="nl-latency" type="number" value="0" min="0" class="num" style="width:80px">
+          <label>丢包 %</label><input id="nl-loss" type="number" value="0" min="0" max="95" class="num" style="width:70px">
+          <label class="hint">代理IP(留空自动探测)</label><input id="nl-host" placeholder="自动" style="width:120px">
+        </div>
+        <div class="form-row">
+          <button id="nl-start" class="btn small primary">开启弱网</button>
+          <button id="nl-stop" class="btn small danger">关闭弱网</button>
+          <span class="spacer"></span>
+          <span id="nl-status" class="hint">未开启</span>
+        </div>
+        <div id="nl-result" class="result-box"></div>
+      </div>
     </section>
 
     <section id="tab-scenario" class="tabpane">
@@ -204,6 +241,11 @@
               <option value="wait_el">wait_el 等待控件出现</option>
               <option value="assert_el">assert_el 控件存在性断言</option>
               <option value="swipe_el">swipe_el 控件内滑动</option>
+              <option value="reboot">reboot 重启设备(可选等待上线)</option>
+              <option value="locate">locate 找机(亮屏+最大亮度)</option>
+              <option value="airplane">airplane 飞行模式</option>
+              <option value="lock">lock 锁屏</option>
+              <option value="unlock">unlock 解锁</option>
               <option value="loop">loop 循环</option>
             </select>
             <button id="sc-add" class="btn small">添加步骤</button>
@@ -632,12 +674,12 @@
 </div>
 <!-- posthog-js 以 ES module 引入（无构建步骤）：importmap 把裸导入名指到本地 SDK 副本 -->
 <script type="importmap">
-{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=049"}}
+{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=050"}}
 </script>
-<script src="/static/js/api.js?v=049"></script>
-<script type="module" src="/static/js/analytics.js?v=049"></script>
-<script src="/static/js/mirror.js?v=049"></script>
-<script src="/static/js/scenario.js?v=049"></script>
-<script src="/static/js/app.js?v=049"></script>
+<script src="/static/js/api.js?v=050"></script>
+<script type="module" src="/static/js/analytics.js?v=050"></script>
+<script src="/static/js/mirror.js?v=050"></script>
+<script src="/static/js/scenario.js?v=050"></script>
+<script src="/static/js/app.js?v=050"></script>
 </body>
 </html>

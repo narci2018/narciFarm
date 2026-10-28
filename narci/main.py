@@ -158,7 +158,7 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-__version__ = "0.9.8"
+__version__ = "0.9.9"
 app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 
@@ -645,6 +645,176 @@ async def api_resolve_at(serial: str, body: dict, _=Depends(_auth.require_user))
         "element": {"text": el.get("text", ""), "id": el.get("id", ""),
                     "desc": el.get("desc", ""), "class": el.get("class", "")},
     }
+
+
+# ---------- 批量快捷操作 ----------
+
+# 批量操作：action -> (是否需参数, 参数名, 单设备执行函数)
+_BATCH_ACTIONS = {
+    "reboot":     (False, None, None),
+    "power_off":  (False, None, None),
+    "lock":       (False, None, None),
+    "unlock":     (False, None, None),
+    "locate":     (False, None, None),
+    "airplane_on":  (False, None, None),
+    "airplane_off": (False, None, None),
+    "kill_app":   (True, "package", None),
+    "clear_data": (True, "package", None),
+    "stay_awake": (False, None, None),
+}
+
+
+async def _run_batch_action(serial: str, action: str, params: dict) -> dict:
+    if action == "reboot":
+        await adb.reboot_device(serial)
+    elif action == "power_off":
+        await adb.power_off(serial)
+    elif action == "lock":
+        await adb.lock_device(serial)
+    elif action == "unlock":
+        await adb.unlock_device(serial)
+    elif action == "locate":
+        await adb.locate_device(serial)
+    elif action == "airplane_on":
+        await adb.set_airplane_mode(serial, True)
+    elif action == "airplane_off":
+        await adb.set_airplane_mode(serial, False)
+    elif action == "kill_app":
+        return {"killed": await adb.kill_process(serial, params["package"])}
+    elif action == "clear_data":
+        return {"cleared": await adb.clear_app_data(serial, params["package"])}
+    elif action == "stay_awake":
+        await adb.stay_awake(serial)
+    else:
+        raise HTTPException(400, f"未知批量操作: {action}")
+    return {"ok": True}
+
+
+@app.post("/api/batch/action")
+async def api_batch_action(body: dict, _=Depends(_auth.require_user)):
+    """对多台设备执行快捷操作（重启/飞行模式/找机/清数据等）。"""
+    targets = _targets_body(body)
+    action = str(body.get("action", "")).strip()
+    if action not in _BATCH_ACTIONS:
+        raise HTTPException(400, f"未知批量操作: {action}")
+    need_param, param_name, _ = _BATCH_ACTIONS[action]
+    params = {}
+    if need_param:
+        params[param_name] = str(body.get(param_name, "")).strip()
+        if not params[param_name]:
+            raise HTTPException(400, f"缺少参数: {param_name}")
+    online = {d["serial"] for d in await adb.list_devices() if d["state"] == "device"}
+    targets = [t for t in targets if t in online]
+    if not targets:
+        raise HTTPException(400, "目标设备均不在线")
+    results = {}
+    for serial in targets:
+        try:
+            results[serial] = {"ok": True, **(await _run_batch_action(serial, action, params))}
+        except HTTPException:
+            raise
+        except Exception as e:
+            results[serial] = {"ok": False, "error": str(e)}
+    return {"action": action, "targets": targets, "results": results}
+
+
+@app.get("/api/batch/actions")
+async def api_batch_actions(_=Depends(_auth.require_user)):
+    """可用的批量操作清单（供前端渲染按钮）。"""
+    return [{"action": a, "needs_param": n, "param": p}
+            for a, (n, p, _) in _BATCH_ACTIONS.items()]
+
+
+# ---------- 弱网模拟 ----------
+
+_netlimit = {
+    "proxy": None,
+    "targets": [],
+    "rate_kbps": 0.0,
+    "latency_ms": 0,
+    "loss_pct": 0.0,
+    "host": "",
+    "port": 0,
+}
+
+
+def _local_ip() -> str:
+    """探测本机在设备所在局域网的 IP（供设备回连代理）。"""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+async def _netlimit_start(targets: list, body: dict) -> dict:
+    from .netlimit import ThrottleProxy
+    rate = max(1.0, float(body.get("rate_kbps", 500)))
+    latency = max(0, int(body.get("latency_ms", 0) or 0))
+    loss = max(0.0, min(95.0, float(body.get("loss_pct", 0) or 0)))
+    host = str(body.get("host") or _local_ip())
+
+    if _netlimit["proxy"] is None:
+        _netlimit["proxy"] = ThrottleProxy(rate_kbps=rate, latency_ms=latency,
+                                           loss_pct=loss, host="0.0.0.0")
+        await _netlimit["proxy"].start()
+    _netlimit.update(targets=targets, rate_kbps=rate, latency_ms=latency,
+                     loss_pct=loss, host=host, port=_netlimit["proxy"].port)
+
+    online = {d["serial"] for d in await adb.list_devices() if d["state"] == "device"}
+    applied = []
+    for serial in targets:
+        if serial not in online:
+            continue
+        try:
+            await adb.set_global_proxy(serial, host, _netlimit["proxy"].port)
+            applied.append(serial)
+        except adb.AdbError as e:
+            bus.warn(f"弱网模拟设置代理失败 {serial}: {e}")
+    _netlimit["targets"] = applied
+    return {
+        "ok": True, "applied": applied, "skipped": [t for t in targets if t not in applied],
+        "proxy": f"{host}:{_netlimit['proxy'].port}",
+        "rate_kbps": rate, "latency_ms": latency, "loss_pct": loss,
+    }
+
+
+async def _netlimit_stop(targets: list) -> dict:
+    cleared = []
+    for serial in targets:
+        with suppress(adb.AdbError):
+            await adb.clear_global_proxy(serial)
+            cleared.append(serial)
+    remaining = [t for t in _netlimit["targets"] if t not in cleared]
+    if not remaining and _netlimit["proxy"] is not None:
+        _netlimit["proxy"].stop()
+        _netlimit["proxy"] = None
+        _netlimit.update(targets=[], rate_kbps=0.0, latency_ms=0, loss_pct=0.0,
+                         host="", port=0)
+    else:
+        _netlimit["targets"] = remaining
+    return {"ok": True, "cleared": cleared}
+
+
+@app.get("/api/netlimit/status")
+async def api_netlimit_status(_=Depends(_auth.require_user)):
+    return dict(_netlimit, running=_netlimit["proxy"] is not None)
+
+
+@app.post("/api/netlimit/start")
+async def api_netlimit_start(body: dict, _=Depends(_auth.require_user)):
+    targets = _targets_body(body)
+    return await _netlimit_start(targets, body)
+
+
+@app.post("/api/netlimit/stop")
+async def api_netlimit_stop(body: dict, _=Depends(_auth.require_user)):
+    targets = _targets_body(body)
+    return await _netlimit_stop(targets)
 
 
 # ---------- 控件树 / 元素定位 ----------

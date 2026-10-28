@@ -187,6 +187,39 @@ class Client:
     def report_junit(self, report_id: str) -> str:
         return self._request("GET", f"/api/reports/{report_id}.xml")
 
+    # ---------- 批量快捷操作 ----------
+
+    def batch_actions(self) -> list:
+        """可用的批量操作清单。"""
+        return self._request("GET", "/api/batch/actions")
+
+    def batch_action(self, action: str, targets: list,
+                     package: Optional[str] = None) -> dict:
+        """对多台设备执行快捷操作（重启/飞行模式/找机/清除数据等）。"""
+        body = {"action": action, "targets": targets}
+        if package:
+            body["package"] = package
+        return self._request("POST", "/api/batch/action", body)
+
+    # ---------- 弱网模拟 ----------
+
+    def netlimit_status(self) -> dict:
+        return self._request("GET", "/api/netlimit/status")
+
+    def netlimit_start(self, targets: list, rate_kbps: float = 500,
+                       latency_ms: int = 0, loss_pct: float = 0,
+                       host: Optional[str] = None) -> dict:
+        """开启弱网模拟：把设备代理指向本机节流代理。"""
+        body = {"targets": targets, "rate_kbps": rate_kbps,
+                "latency_ms": latency_ms, "loss_pct": loss_pct}
+        if host:
+            body["host"] = host
+        return self._request("POST", "/api/netlimit/start", body)
+
+    def netlimit_stop(self, targets: list) -> dict:
+        """关闭弱网模拟并清除设备代理。"""
+        return self._request("POST", "/api/netlimit/stop", {"targets": targets})
+
     # ---------- 其他 ----------
 
     def plugins(self) -> dict:

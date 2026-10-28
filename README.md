@@ -49,6 +49,8 @@ FastAPI 后端 (narci/)
 | 控件树可视化拾取器（树形展开/折叠、属性面板、一键生成步骤） | Appium Inspector / PocoHierarchyViewer |
 | 步骤插件机制（Python 模块扩展步骤类型，不覆盖内置） | Appium 插件 / SoloPi |
 | Python SDK（设备/场景/报告，标准库实现，CI 友好） | — |
+| 设备快捷操作（重启/飞行模式/找机/清数据，批量） | Intune / SOTI / Esper |
+| 弱网模拟（带宽/延迟/丢包，代理层实现，真机免 root） | BrowserStack / Sauce Labs / LambdaTest |
 
 ## 快速开始
 
