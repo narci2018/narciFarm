@@ -17,17 +17,34 @@ from .scrcpy_protocol import (DEVICE_META_LEN, PacketHeader,
                               parse_device_message, parse_packet_header)
 
 _open_server_jars: set[str] = set()  # 已推送过 jar 的设备 serial
+_push_tasks: dict[str, asyncio.Task] = {}  # 进行中的推送任务（防止预推送与打开投屏并发推同一文件）
+
+
+async def _jar_push_task(serial: str) -> asyncio.Task:
+    """获取该设备的 jar 推送任务: 已推送→已完成占位; 进行中→复用同一任务(防竞态)。"""
+    if serial in _open_server_jars:
+        async def _noop():
+            return None
+        return asyncio.create_task(_noop())
+    t = _push_tasks.get(serial)
+    if t is not None and not t.done():
+        return t
+
+    async def _do() -> None:
+        try:
+            await adb.push(serial, str(SERVER_JAR), REMOTE_JAR_PATH, timeout=60)
+            _open_server_jars.add(serial)
+        except Exception as e:
+            bus.warn(f"[{serial}] 预推送 scrcpy-server 失败: {e}")
+
+    t = asyncio.create_task(_do())
+    _push_tasks[serial] = t
+    return t
 
 
 async def ensure_jar_pushed(serial: str) -> None:
     """预推送 scrcpy-server（发现设备时后台调用），打开投屏即省去一次 push。"""
-    if serial in _open_server_jars:
-        return
-    try:
-        await adb.push(serial, str(SERVER_JAR), REMOTE_JAR_PATH, timeout=60)
-        _open_server_jars.add(serial)
-    except Exception as e:
-        bus.warn(f"[{serial}] 预推送 scrcpy-server 失败: {e}")
+    await _jar_push_task(serial)
 
 
 class ScrcpyClientError(Exception):
@@ -126,8 +143,7 @@ class ScrcpyClient:
         socket_name = f"scrcpy_{self._scid:08x}"
 
         if self.serial not in _open_server_jars:
-            await adb.push(self.serial, str(SERVER_JAR), REMOTE_JAR_PATH, timeout=60)
-            _open_server_jars.add(self.serial)
+            await _jar_push_task(self.serial)  # 与后台预推送共用同一任务，防并发推同一文件
             await _mark("jar推送")
         else:
             await _mark("jar已缓存")
@@ -371,7 +387,15 @@ class StreamHub:
                     try:
                         q.put_nowait(item)
                     except asyncio.QueueFull:
-                        pass  # 慢观看者丢帧，不影响其他观看者
+                        # 队列满: 丢最旧帧再补最新帧（保证延迟有界, 不越积越旧）
+                        try:
+                            q.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
+                        try:
+                            q.put_nowait(item)
+                        except asyncio.QueueFull:
+                            pass
 
             async def _on_session(w: int, h: int) -> None:
                 _fanout(("json", {"type": "session", "width": w, "height": h}))

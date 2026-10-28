@@ -105,6 +105,15 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
 .capture-grid img { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
 .capture-grid .cap { font-size: 11px; color: var(--dim); word-break: break-all; }
 
+/* 全局滚动条: 与深色主题协调 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--panel); }
+::-webkit-scrollbar-thumb { background: #3a4656; border-radius: 5px; border: 2px solid var(--panel); }
+::-webkit-scrollbar-thumb:hover { background: var(--acc); }
+::-webkit-scrollbar-corner { background: var(--panel); }
+html, body, .mirror-move, .device-list, .group-list, .console-out, .result-box,
+.capture-grid, .device-grid, .sidebar, .content { scrollbar-color: #3a4656 var(--panel); scrollbar-width: thin; }
+
 /* 投屏窗口：固定定位、标题栏拖拽移动、原生 resize:both 缩放 */
 .mirror-move { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
@@ -157,3 +166,21 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
 .toast.error { border-left-color: var(--bad); }
 .toast.ok { border-left-color: var(--ok); }
 .toast.warn { border-left-color: var(--warn); }
+
+/* 最大化态 */
+.mirror-move.maximized { top: 8px !important; left: 8px !important; transform: none !important;
+  width: calc(100vw - 16px) !important; height: calc(100vh - 16px) !important; resize: none; }
+.mirror-move.maximized #mm-resize-handle { display: none; }
+/* 窗口控制按钮 */
+.win-ctrl { display: flex; gap: 4px; margin-left: 8px; flex-shrink: 0; }
+.win-btn { width: 28px; height: 22px; padding: 0; font-size: 13px; line-height: 1;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 4px;
+  color: var(--dim); cursor: pointer; }
+.win-btn:hover { color: var(--fg); border-color: var(--acc); }
+.win-btn.close:hover { color: #fff; background: var(--bad); border-color: var(--bad); }
+/* 最小化后的浮动 pill */
+#mm-minimized-pill { position: fixed; left: 16px; bottom: 16px; z-index: 150;
+  background: var(--panel2); border: 1px solid var(--acc); border-radius: 8px;
+  padding: 8px 12px; display: flex; gap: 10px; align-items: center;
+  box-shadow: 0 4px 20px rgba(0,0,0,.5); }
+#mm-minimized-pill.hidden { display: none; }

@@ -604,8 +604,17 @@ function openMirror(serial, opts = {}) {
       ScenarioEditor._syncRaw();
       ScenarioEditor.render();
     },
-    onFallback: (reason) => { hideLoading(); recInd.textContent = `快照模式(${reason.slice(0, 20)})`; },
-    onReady: () => hideLoading(),
+    onFallback: (reason) => {
+      hideLoading();
+      recInd.textContent = `快照模式(${reason.slice(0, 20)})`;
+      const mb = $('mm-mode');
+      if (mb) { mb.textContent = '快照模式（延迟高）'; mb.className = 'hint warn'; }
+    },
+    onReady: () => {
+      hideLoading();
+      const mb = $('mm-mode');
+      if (mb) { mb.textContent = '实时'; mb.className = 'hint ok'; }
+    },
     onInjectFeedback: (action, targets, results) => {
       const st = $('mm-inject-status');
       if (!st) return;
@@ -680,6 +689,30 @@ function openMirror(serial, opts = {}) {
     $('mirror-modal').classList.add('hidden');
   };
   $('mm-close').onclick = closeMirror;
+
+  // ===== 窗口控制: 最小化 / 最大化 =====
+  const pill = $('mm-minimized-pill');
+  $('mm-min').onclick = () => {
+    pill.querySelector('#mm-pill-title').textContent = `投屏 ${serial}`;
+    pill.classList.remove('hidden');
+    $('mirror-modal').classList.add('hidden');
+  };
+  $('mm-pill-restore').onclick = () => {
+    pill.classList.add('hidden');
+    $('mirror-modal').classList.remove('hidden');
+    mv.classList.remove('maximized');
+  };
+  $('mm-max').onclick = () => {
+    mv.classList.toggle('maximized');
+    $('mm-max').textContent = mv.classList.contains('maximized') ? '❐' : '▢';
+  };
+  // pill 帧率同步
+  setInterval(() => {
+    const pf = $('mm-pill-fps');
+    if (pf && !pill.classList.contains('hidden') && State.mirror) {
+      pf.textContent = State.mirror.fallback ? '快照模式' : `${State.mirror.fps} fps`;
+    }
+  }, 2000);
   document.querySelectorAll('.mirror-subbar [data-key]').forEach(btn => {
     btn.onclick = () => State.mirror && State.mirror.key(btn.dataset.key);
   });

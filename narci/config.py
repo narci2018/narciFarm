@@ -58,8 +58,8 @@ HOST = os.environ.get("NARCI_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NARCI_PORT", "8555"))
 
 # 默认投屏参数
-MAX_SIZE = int(os.environ.get("NARCI_MAX_SIZE", "1280"))
-VIDEO_BITRATE = int(os.environ.get("NARCI_BITRATE", "8000000"))
+MAX_SIZE = int(os.environ.get("NARCI_MAX_SIZE", "960"))
+VIDEO_BITRATE = int(os.environ.get("NARCI_BITRATE", "4000000"))
 MAX_FPS = int(os.environ.get("NARCI_FPS", "30"))
 
 # 设备轮询间隔（秒）

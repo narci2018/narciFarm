@@ -181,6 +181,11 @@ class Mirror {
     const key = dv.getUint8(1);
     const pts = Number(dv.getBigUint64(2));
     const payload = u8.subarray(10);
+    // 解码积压时跳非关键帧（保证画面延迟有界）
+    if (this.decoder.decodeQueueSize > 12 && !key) {
+      this.dropped++;
+      return;
+    }
     try {
       this.decoder.decode(new EncodedVideoChunk({
         type: key ? 'key' : 'delta', timestamp: pts, data: payload,
