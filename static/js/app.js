@@ -188,6 +188,15 @@ function renderDeviceGrid() {
     card.dataset.serial = d.serial;
     card.classList.toggle('offline', d.state !== 'device');
     card.querySelector('.name').textContent = `${d.serial}${d.model ? ' · ' + d.model : ''}`;
+    let agTag = card.querySelector('.agent-tag');
+    if (d.agent_name) {
+      if (!agTag) {
+        agTag = document.createElement('span');
+        agTag.className = 'agent-tag hint';
+        card.querySelector('.meta').appendChild(agTag);
+      }
+      agTag.textContent = `⌖ ${d.agent_name}`;
+    } else if (agTag) agTag.remove();
     const dot = card.querySelector('.dstate');
     dot.className = `dstate ${d.state}`;
     existing.delete(d.serial);
@@ -1227,8 +1236,28 @@ async function bookDevice(serial) {
 
 /* ---------- 团队管理(管理员) ---------- */
 
+async function loadAgents() {
+  try {
+    const agents = await API.get('/api/agents');
+    const tb = $('team-agents').querySelector('tbody');
+    tb.innerHTML = agents.length ? '' : '<tr><td colspan="6" class="hint">暂无 Agent 接入</td></tr>';
+    for (const a of agents) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(a.agent_id)}</td><td>${esc(a.name)}</td><td class="hint">${esc(a.url)}</td>
+        <td>${a.device_count}</td><td>${a.online ? '🟢在线' : '🔴离线'}</td>
+        <td><button class="btn small danger" data-del-agent="${esc(a.agent_id)}">移除</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-del-agent]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/agents/${encodeURIComponent(b.dataset.delAgent)}`);
+      loadAgents();
+    });
+  } catch (e) {}
+}
+
 async function loadTeam() {
   if (!State.user || State.user.role !== 'admin') return;
+  loadAgents();
   const [users, parts] = await Promise.all([API.get('/api/users'), API.get('/api/partitions')]);
   // 用户表
   const utb = $('team-users').querySelector('tbody');

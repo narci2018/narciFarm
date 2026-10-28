@@ -262,6 +262,11 @@
         <table class="data-table" id="team-users"><thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>操作</th></tr></thead><tbody></tbody></table>
       </div>
       <div class="pane-card">
+        <h3>Agent 管理(分布式)</h3>
+        <div class="hint">各 PC 运行 <code>py -3 agent.py --center http://本机IP:8555</code> 接入; 远程设备自动出现在设备列表(标注来源)。</div>
+        <table class="data-table" id="team-agents"><thead><tr><th>Agent</th><th>名称</th><th>地址</th><th>设备数</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
         <h3>分区管理</h3>
         <div class="form-row">
           <input id="tp-name" placeholder="分区名">

@@ -1,5 +1,6 @@
 """narciFarm 主应用：REST API + WebSocket（投屏桥接 / 事件流）+ 后台循环。"""
 import asyncio
+import base64
 import json
 import os
 import threading
@@ -222,6 +223,19 @@ async def api_devices(refresh: bool = False, request: Request = None):
         if serial not in known:
             db.upsert_device(serial, model=d["model"])
             out.append({**(db.get_device(serial) or {"serial": serial}), "state": d["state"], "present": True})
+    # 附加远程设备(分布式 Agent)
+    remote = {d["serial"]: d for d in db.list_remote_devices()}
+    agents = {a["agent_id"]: a for a in db.list_agents()}
+    out_serials = {d["serial"] for d in out}
+    for serial, rd in remote.items():
+        if serial in out_serials:
+            continue
+        ag = agents.get(rd["agent_id"], {})
+        out.append({"serial": serial, "model": rd["model"], "android_version": rd["android_version"],
+                    "sdk": rd["sdk"], "width": rd["width"], "height": rd["height"],
+                    "state": "remote" if ag.get("last_seen", 0) and (time.time() - ag["last_seen"]) < 45 else "offline",
+                    "present": True, "group_id": None, "notes": "", "last_seen": "",
+                    "agent_id": rd["agent_id"], "agent_name": ag.get("name", rd["agent_id"])})
     # 非管理员: 只返回自己分区的设备
     user = getattr(request.state, "user", None)
     if user and user.get("role") != "admin":
@@ -229,16 +243,11 @@ async def api_devices(refresh: bool = False, request: Request = None):
         for pid in db.user_partitions(user["id"]):
             mine.update(db.partition_devices(pid))
         out = [d for d in out if d["serial"] in mine]
-        # 附加预约状态
-        for d in out:
-            b = db.active_booking(d["serial"])
-            d["booked"] = bool(b)
-            d["booked_by_me"] = bool(b and b["user_id"] == user["id"])
-    else:
-        for d in out:
-            b = db.active_booking(d["serial"])
-            d["booked"] = bool(b)
-            d["booked_by_me"] = False
+    # 附加预约状态
+    for d in out:
+        b = db.active_booking(d["serial"])
+        d["booked"] = bool(b)
+        d["booked_by_me"] = bool(b and b["user_id"] == user["id"]) if user else False
     return out
 
 
@@ -275,6 +284,9 @@ async def api_stream_stats(serial: str):
 
 @app.get("/api/devices/{serial}/apps")
 async def api_apps(serial: str):
+    if db.agent_of(serial):
+        r = await _proxy_to_agent(serial, "apps", {})
+        return {"apps": r.get("apps", [])}
     apps = await adb.list_apps(serial)
     return {"apps": apps}
 
@@ -319,6 +331,9 @@ async def api_shell(serial: str, body: dict):
     cmd = str(body.get("cmd", "")).strip()
     if not cmd:
         raise HTTPException(400, "命令为空")
+    if db.agent_of(serial):
+        r = await _proxy_to_agent(serial, "shell", {"cmd": cmd, "timeout": body.get("timeout", 20)})
+        return {"rc": r.get("rc", -1), "out": r.get("out", "")}
     timeout = float(body.get("timeout", 20))
     rc, out = await adb.shell(serial, cmd, timeout=timeout)
     return {"rc": rc, "out": out}
@@ -359,6 +374,9 @@ async def api_input_multi(body: dict):
 @app.post("/api/devices/{serial}/input")
 async def api_input(serial: str, body: dict, request: Request):
     _booking_guard(serial, request.state.user)
+    if db.agent_of(serial):
+        r = await _proxy_to_agent(serial, "input", {"action": body.get("action"), "params": body.get("params", {})})
+        return {"ok": r.get("ok", False), **({"error": r["error"]} if r.get("error") else {})}
     try:
         note = await _input_action(serial, body["action"], body.get("params", {}))
     except adb.AdbError as e:
@@ -375,6 +393,8 @@ async def api_broadcast(body: dict, request: Request):
     action = body.get("action", "tap")
     params = body.get("params", {})
 
+    local, remote = _split_local_remote(targets)
+
     async def one(serial: str):
         try:
             note = await _input_action(serial, action, params)
@@ -382,7 +402,14 @@ async def api_broadcast(body: dict, request: Request):
         except Exception as e:
             return serial, str(e), None
 
-    results = await asyncio.gather(*(one(s) for s in targets))
+    async def one_remote(serial: str):
+        try:
+            r = await _proxy_to_agent(serial, "input", {"action": action, "params": params})
+            return serial, (r.get("error") if not r.get("ok") else None), None
+        except Exception as e:
+            return serial, str(e), None
+
+    results = await asyncio.gather(*(one(x) for x in local), *(one_remote(x) for x in remote))
     failed = {s: err for s, err, _ in results if err}
     notes = {s: n for s, _, n in results if n}
     return {"ok": not failed, "sent": len(targets) - len(failed), "failed": failed, "notes": notes}
@@ -390,7 +417,14 @@ async def api_broadcast(body: dict, request: Request):
 
 @app.post("/api/devices/{serial}/screenshot")
 async def api_screenshot_save(serial: str):
-    data = await adb.screenshot_bytes(serial)
+    if db.agent_of(serial):
+        r = await _proxy_to_agent(serial, "screenshot", {})
+        if r.get("ok") and r.get("image_base64"):
+            data = base64.b64decode(r["image_base64"])
+        else:
+            raise HTTPException(502, r.get("error", "Agent 截图失败"))
+    else:
+        data = await adb.screenshot_bytes(serial)
     name = f"{serial}_{time.strftime('%Y%m%d_%H%M%S')}.png"
     path = CAPTURES_DIR / name
     path.write_bytes(data)
@@ -515,7 +549,15 @@ async def api_run_scenario(scenario_id: int, body: dict):
         raise HTTPException(400, "目标设备均不在线")
     steps = json.loads(sc["steps"])
     repeat = int(body.get("repeat_count") or sc.get("repeat_count") or 1)
-    run_id = await scenario.start_run(steps, repeat, targets, body.get("vars"))
+    local, remote = _split_local_remote(targets)
+    if remote:
+        r = await _proxy_to_agent(remote[0], "scenario_run",
+                                  {"steps": steps, "repeat_count": repeat, "vars": body.get("vars") or {},
+                                   "targets": remote})
+        if not r.get("ok"):
+            raise HTTPException(502, r.get("error", "Agent 场景执行失败"))
+        return {"run_id": r.get("run_id"), "targets": targets, "remote": True}
+    run_id = await scenario.start_run(steps, repeat, local, body.get("vars"))
     return {"run_id": run_id, "targets": targets}
 
 
@@ -610,6 +652,10 @@ async def ws_mirror(ws: WebSocket, serial: str):
     if not user:
         await ws.send_json({"type": "error", "msg": "未登录"})
         await ws.close()
+        return
+    # 远程设备: 中继到所属 Agent 的投屏 WS
+    if db.agent_of(serial):
+        await _proxy_mirror(ws, serial, db.agent_of(serial), ws.query_params.get("quality", "medium"))
         return
     control = ws.query_params.get("control", "1") != "0"
     quality = ws.query_params.get("quality", "medium")
@@ -771,6 +817,9 @@ app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
 @app.get("/api/devices/{serial}/logcat")
 async def api_logcat(serial: str, lines: int = 300, level: str = "V", filter: str = ""):
     args = ["logcat", "-d", "-t", str(min(max(lines, 10), 2000)), f"*:{level}"]
+    if db.agent_of(serial):
+        r = await _proxy_to_agent(serial, "logcat", {"lines": lines, "level": level})
+        return {"lines": r.get("lines", [])}
     if filter:
         args.append(filter)
     rc, out = await adb.shell(serial, " ".join(args), timeout=20)
@@ -779,6 +828,9 @@ async def api_logcat(serial: str, lines: int = 300, level: str = "V", filter: st
 
 @app.get("/api/devices/{serial}/files")
 async def api_list_files(serial: str, path: str = "/sdcard"):
+    if db.agent_of(serial):
+        r = await _proxy_to_agent(serial, "files", {"path": path})
+        return {"path": path, "entries": r.get("entries", [])}
     return {"path": path, "entries": await adb.list_dir(serial, path)}
 
 
@@ -817,6 +869,9 @@ async def api_delete_file(serial: str, path: str = ""):
 
 @app.get("/api/devices/{serial}/metrics")
 async def api_metrics(serial: str):
+    if db.agent_of(serial):
+        r = await _proxy_to_agent(serial, "metrics", {})
+        return {k: v for k, v in r.items() if k != "ok"}
     m = await adb.get_metrics(serial)
     client = hub.get(serial)
     if client:
@@ -827,6 +882,9 @@ async def api_metrics(serial: str):
 
 @app.post("/api/devices/{serial}/startup_time")
 async def api_startup_time(serial: str, body: dict):
+    if db.agent_of(serial):
+        r = await _proxy_to_agent(serial, "startup_time", {"package": body.get("package", ""), "cold": bool(body.get("cold", True))})
+        return {k: v for k, v in r.items() if k != "ok"}
     return await adb.startup_time(serial, body.get("package", ""), cold=bool(body.get("cold", True)))
 
 
@@ -876,7 +934,7 @@ from . import auth as _auth
 async def auth_middleware(request, call_next):
     """保护 /api/*(登录除外); 用户注入 request.state.user。"""
     path = request.url.path
-    if path.startswith("/api/") and path not in ("/api/login",):
+    if path.startswith("/api/") and path not in ("/api/login", "/api/agents/heartbeat"):
         user = _auth.user_from_token(_auth.extract_token(request))
         if not user:
             return JSONResponse({"detail": "未登录或会话已过期"}, status_code=401)
@@ -1027,6 +1085,86 @@ def _booking_guard(serial: str, user: dict) -> None:
     b = db.active_booking(serial)
     if b and b["user_id"] != user["id"]:
         raise HTTPException(409, f"设备已被 {b.get('username', '?')} 预约占用")
+
+
+
+
+# ---------- 分布式: Agent 注册 / 设备合并 / 控制代理 ----------
+
+import httpx
+
+
+@app.post("/api/agents/heartbeat")
+async def api_agent_heartbeat(body: dict):
+    agent_id = str(body.get("agent_id", "")).strip()
+    if not agent_id:
+        raise HTTPException(400, "缺少 agent_id")
+    db.upsert_agent(agent_id, str(body.get("name", agent_id)),
+                    str(body.get("url", "")), str(body.get("secret", "")))
+    db.upsert_remote_devices(agent_id, body.get("devices", []))
+    return {"ok": True}
+
+
+@app.get("/api/agents")
+async def api_agents(_=Depends(_auth.require_admin)):
+    agents = db.list_agents()
+    for a in agents:
+        a["device_count"] = len([d for d in db.list_remote_devices() if d["agent_id"] == a["agent_id"]])
+        a["online"] = (time.time() - a.get("last_seen", 0)) < 45
+    return agents
+
+
+@app.delete("/api/agents/{agent_id}")
+async def api_delete_agent(agent_id: str, _=Depends(_auth.require_admin)):
+    db.delete_agent(agent_id)
+    return {"ok": True}
+
+
+async def _proxy_to_agent(serial: str, cmd: str, params: dict) -> dict:
+    """把控制命令转发给设备所属的 Agent。"""
+    agent = db.agent_of(serial)
+    if not agent:
+        raise HTTPException(404, "设备不在线或未注册")
+    url = agent["url"].rstrip("/")
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(f"{url}/agent/command", json={"cmd": cmd, "params": {**params, "serial": serial}})
+        return r.json()
+
+
+def _split_local_remote(serials: list[str]) -> tuple[list, list]:
+    remote = {d["serial"] for d in db.list_remote_devices()}
+    return [s for s in serials if s not in remote], [s for s in serials if s in remote]
+
+
+async def _proxy_mirror(ws: WebSocket, serial: str, agent: dict, quality: str) -> None:
+    """远程投屏: 浏览器 ← 中心 ← Agent WS 中继。"""
+    import websockets
+    raw = agent["url"].rstrip("/")
+    ws_url = ("wss://" + raw[len("https://"):]) if raw.startswith("https://") else              ("ws://" + raw[len("http://"):]) if raw.startswith("http://") else raw
+    url = ws_url + f"/agent/mirror/{serial}"
+    try:
+        async with websockets.connect(url) as agent_ws:
+            async def _to_browser():
+                async for msg in agent_ws:
+                    if isinstance(msg, str):
+                        await ws.send_text(msg)
+                    else:
+                        await ws.send_bytes(msg)
+
+            async def _to_agent():
+                while True:
+                    msg = await ws.receive()
+                    if msg["type"] == "websocket.disconnect":
+                        break
+                    if msg.get("text"):
+                        await agent_ws.send(msg["text"])
+
+            await asyncio.gather(_to_browser(), _to_agent())
+    except Exception as e:
+        with suppress(Exception):
+            await ws.send_json({"type": "error", "msg": f"远程投屏失败: {e}"})
+        with suppress(Exception):
+            await ws.close()
 
 
 @app.get("/metrics")

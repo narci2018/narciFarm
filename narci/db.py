@@ -15,6 +15,25 @@ _conn: Optional[sqlite3.Connection] = None
 
 _SCHEMA = """
 
+CREATE TABLE IF NOT EXISTS agents (
+    agent_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    secret TEXT DEFAULT '',
+    last_seen REAL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS remote_devices (
+    serial TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    model TEXT DEFAULT '',
+    android_version TEXT DEFAULT '',
+    sdk INTEGER DEFAULT 0,
+    width INTEGER DEFAULT 0,
+    height INTEGER DEFAULT 0,
+    last_seen REAL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
@@ -413,5 +432,57 @@ def active_booking(serial: str, now: Optional[float] = None) -> Optional[dict]:
     if row:
         u = get_user(row["user_id"])
         row["username"] = u["username"] if u else "?"
+    return row
+
+# ---------- 分布式: Agent / 远程设备 ----------
+
+def upsert_agent(agent_id: str, name: str, url: str, secret: str = "") -> None:
+    import time
+    execute("INSERT INTO agents(agent_id, name, url, secret, last_seen) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(agent_id) DO UPDATE SET name=excluded.name, url=excluded.url, "
+            "secret=excluded.secret, last_seen=excluded.last_seen",
+            (agent_id, name, url, secret, time.time()))
+
+
+def list_agents() -> list[dict]:
+    return query("SELECT * FROM agents ORDER BY last_seen DESC")
+
+
+def delete_agent(agent_id: str) -> None:
+    execute("DELETE FROM remote_devices WHERE agent_id=?", (agent_id,))
+    execute("DELETE FROM agents WHERE agent_id=?", (agent_id,))
+
+
+def upsert_remote_devices(agent_id: str, devices: list[dict]) -> None:
+    import time
+    seen = set()
+    for d in devices:
+        serial = d.get("serial", "")
+        if not serial:
+            continue
+        seen.add(serial)
+        execute("INSERT INTO remote_devices(serial, agent_id, model, android_version, sdk, width, height, last_seen) "
+                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(serial) DO UPDATE SET agent_id=excluded.agent_id, "
+                "model=excluded.model, android_version=excluded.android_version, sdk=excluded.sdk, "
+                "width=excluded.width, height=excluded.height, last_seen=excluded.last_seen",
+                (serial, agent_id, d.get("model", ""), d.get("android_version", ""), d.get("sdk", 0),
+                 d.get("width", 0), d.get("height", 0), time.time()))
+    # 清理该 agent 已下线的设备
+    for row in query("SELECT serial FROM remote_devices WHERE agent_id=?", (agent_id,)):
+        if row["serial"] not in seen:
+            execute("DELETE FROM remote_devices WHERE serial=?", (row["serial"],))
+
+
+def list_remote_devices() -> list[dict]:
+    return query("SELECT * FROM remote_devices ORDER BY agent_id, serial")
+
+
+def get_remote_device(serial: str) -> Optional[dict]:
+    return query_one("SELECT * FROM remote_devices WHERE serial=?", (serial,))
+
+
+def agent_of(serial: str) -> Optional[dict]:
+    row = query_one("SELECT a.* FROM agents a JOIN remote_devices r ON r.agent_id=a.agent_id "
+                    "WHERE r.serial=?", (serial,))
     return row
 
