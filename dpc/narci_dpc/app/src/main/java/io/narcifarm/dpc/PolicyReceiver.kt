@@ -121,10 +121,10 @@ class PolicyReceiver : BroadcastReceiver() {
                 }
 
                 "clear_ca_certs" -> {
-                    val alias = intent.getStringExtra("alias")
-                    if (alias != null) {
-                        dpm.uninstallCaCert(admin, alias)
-                    }
+                    // uninstallCaCert 接受证书的 DER 字节，不接受别名
+                    val path = intent.getStringExtra("path") ?: return
+                    val pem = java.io.File(path).readBytes()
+                    dpm.uninstallCaCert(admin, pemToDer(pem))
                 }
 
                 else -> Log.w(TAG, "未知命令: $command")
