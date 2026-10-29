@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "narcifarm"
-version = "0.9.10"
+version = "0.9.11"
 description = "narciFarm 设备农场 Python SDK（设备枚举 / 场景运行 / 报告导出）"
 readme = "README.md"
 requires-python = ">=3.9"

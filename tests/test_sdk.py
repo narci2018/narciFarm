@@ -134,3 +134,31 @@ def test_input_requires_targets(server):
     c.login("admin", "admin")
     with pytest.raises(NarciError):
         c.input("tap", {"x_pct": 0.5, "y_pct": 0.5}, [])
+
+
+def test_install_ca_cert_rejects_missing_file(server, tmp_path):
+    c = Client(server)
+    c.login("admin", "admin")
+    with pytest.raises(NarciError):
+        c.install_ca_cert("DEV01", str(tmp_path / "nope.crt"))
+
+
+def test_install_ca_cert_uploads(server, tmp_path, monkeypatch):
+    import narci.main as nm
+    cert = tmp_path / "ca.crt"
+    cert.write_bytes(b"-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----\n")
+    pushed = {}
+
+    async def fake_push(serial, local, remote):
+        pushed["remote"] = remote
+
+    async def fake_cmd(serial, command, params):
+        return {"ok": True, "command": command, "owner": "com.x.dpc"}
+
+    monkeypatch.setattr(nm.devicepolicy, "push_ca_cert", fake_push)
+    monkeypatch.setattr(nm.devicepolicy, "send_policy_command", fake_cmd)
+    c = Client(server)
+    c.login("admin", "admin")
+    r = c.install_ca_cert("DEV01", str(cert))
+    assert r["path"] == pushed["remote"]
+    assert r["alias"] == "ca.crt"

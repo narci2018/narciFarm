@@ -5,8 +5,11 @@ import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.net.wifi.WifiConfiguration
+import android.net.wifi.WifiManager
 import android.os.UserManager
 import android.util.Log
+import android.net.wifi.WifiConfiguration.KeyMgmt
 
 /**
  * 策略命令接收器：实现 narciFarm 的广播契约（io.narcifarm.POLICY）。
@@ -77,11 +80,68 @@ class PolicyReceiver : BroadcastReceiver() {
                     dpm.setScreenCaptureDisabled(admin, disabled)
                 }
 
+                "set_wifi" -> {
+                    // Device Owner 可免用户确认地配置 Wi-Fi
+                    val ssid = intent.getStringExtra("ssid") ?: return
+                    val pwd = intent.getStringExtra("password")
+                    val hidden = intent.getBooleanExtra("hidden", false)
+                    val wm = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                    val cfg = WifiConfiguration().apply {
+                        this.SSID = "\"$ssid\""
+                        this.hiddenSSID = hidden
+                        if (pwd.isNullOrEmpty()) {
+                            allowedKeyManagement.set(KeyMgmt.NONE)
+                        } else {
+                            allowedKeyManagement.set(KeyMgmt.WPA_PSK)
+                            preSharedKey = "\"$pwd\""
+                        }
+                    }
+                    val netId = wm.addNetwork(cfg)
+                    if (netId < 0) throw SecurityException("addNetwork 失败")
+                    wm.disconnect()
+                    wm.enableNetwork(netId, true)
+                    wm.reconnect()
+                }
+
+                "set_always_on_vpn" -> {
+                    val pkg = intent.getStringExtra("package") ?: ""
+                    if (pkg.isEmpty()) {
+                        dpm.setAlwaysOnVpnPackage(admin, null, false)
+                    } else {
+                        dpm.setAlwaysOnVpnPackage(admin, pkg, true)
+                    }
+                }
+
+                "install_ca_cert" -> {
+                    val path = intent.getStringExtra("path") ?: return
+                    val pem = java.io.File(path).readBytes()
+                    // PEM -> DER（DevicePolicyManager 只接受 DER 编码的 X.509）
+                    val der = pemToDer(pem)
+                    dpm.installCaCert(admin, der)
+                }
+
+                "clear_ca_certs" -> {
+                    val alias = intent.getStringExtra("alias")
+                    if (alias != null) {
+                        dpm.uninstallCaCert(admin, alias)
+                    }
+                }
+
                 else -> Log.w(TAG, "未知命令: $command")
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "权限不足（需要 Device Owner）: $command", e)
         }
+    }
+
+    /** PEM 证书 -> DER 字节（去掉首尾标记与换行后 Base64 解码）。 */
+    private fun pemToDer(pem: ByteArray): ByteArray {
+        val text = String(pem, Charsets.UTF_8)
+        val b64 = text
+            .replace("-----BEGIN CERTIFICATE-----", "")
+            .replace("-----END CERTIFICATE-----", "")
+            .replace("\\s".toRegex(), "")
+        return android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
     }
 
     companion object {

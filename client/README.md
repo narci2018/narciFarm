@@ -64,6 +64,7 @@ with Client("http://127.0.0.1:8555") as c:
 | `policy_commands()` | 支持的设备托管策略命令 |
 | `set_device_owner(serial, component)` / `remove_device_owner(...)` | 设置 / 移除 Device Owner |
 | `policy_command(serial, command, params)` | 下发策略命令（锁屏/擦除/Kiosk/相机限制） |
+| `install_ca_cert(serial, cert_path, alias)` | 上传并安装 CA 证书（Wi-Fi/VPN 命令走 policy_command） |
 
 ## CI 集成示例
 

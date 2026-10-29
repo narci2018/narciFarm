@@ -427,6 +427,43 @@ async function runBatchAction(action) {
   }
 }
 
+async function runNetPolicy(command, params, label) {
+  const serial = window.appSelectedDevices()[0] || $('dt-device')?.value;
+  if (!serial) return toast('请先选择设备', 'error');
+  if (command === 'set_wifi' && !params.ssid) return toast('请填写 Wi-Fi 名称', 'error');
+  const box = $('do-result');
+  box.textContent = `下发 ${label} 中…`;
+  try {
+    const r = await API.post(`/api/devices/${encodeURIComponent(serial)}/policy/command`,
+                             { command, params });
+    box.textContent = `已下发 ${command} -> ${r.owner}`;
+    toast('完成', 'ok');
+    loadPolicyStatus();
+  } catch (e) {
+    box.textContent = e.message;
+    toast(e.message, 'error');
+  }
+}
+
+async function installCaCert() {
+  const serial = window.appSelectedDevices()[0] || $('dt-device')?.value;
+  const file = $('ca-file').files[0];
+  if (!serial) return toast('请先选择设备', 'error');
+  if (!file) return toast('请选择证书文件(.crt/.pem)', 'error');
+  const box = $('do-result');
+  box.textContent = '上传证书…';
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const r = await API.post(`/api/devices/${encodeURIComponent(serial)}/ca-cert`, fd);
+    box.textContent = `证书已安装: ${r.alias || r.path || '完成'}`;
+    toast('证书已安装', 'ok');
+  } catch (e) {
+    box.textContent = e.message;
+    toast(e.message, 'error');
+  }
+}
+
 async function runNetLimit(start) {
   const targets = window.appSelectedDevices();
   if (!targets.length) return toast('请先勾选目标设备', 'error');
@@ -584,6 +621,15 @@ function bindBatch() {
   $('do-provision').onclick = () => provisionDeviceOwner(true);
   $('do-deprovision').onclick = () => provisionDeviceOwner(false);
   $('do-run').onclick = runPolicyCommand;
+  $('wifi-set').onclick = () => runNetPolicy('set_wifi', {
+    ssid: $('wifi-ssid').value.trim(),
+    password: $('wifi-pass').value,
+    hidden: $('wifi-hidden').checked,
+  }, 'Wi-Fi');
+  $('vpn-set').onclick = () => runNetPolicy('set_always_on_vpn', {
+    package: $('vpn-pkg').value.trim(),
+  }, '始终开启 VPN');
+  $('ca-push').onclick = installCaCert;
   $('nl-start').onclick = () => runNetLimit(true);
   $('nl-stop').onclick = () => runNetLimit(false);
   document.querySelectorAll('#batch-actions [data-act], [data-act="kill_app"], [data-act="clear_data"]').forEach(btn => {

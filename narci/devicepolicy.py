@@ -27,6 +27,8 @@ POLICY_COMMANDS = (
     "lock_now", "wipe", "set_kiosk", "clear_kiosk",
     "suspend_app", "unsuspend_app",
     "set_factory_reset_allowed", "set_camera_disabled", "set_screen_capture_disabled",
+    # 网络与证书（需 Device Owner）
+    "set_wifi", "set_always_on_vpn", "install_ca_cert", "clear_ca_certs",
 )
 
 
@@ -125,6 +127,12 @@ async def remove_device_owner(serial: str, component: str) -> dict:
     return {"ok": True, "component": comp}
 
 
+async def push_ca_cert(serial: str, local_path: str, remote_path: str = "/data/local/tmp/narci_ca.crt") -> str:
+    """把 CA 证书推到设备（安装证书前的前置步骤）。返回远端路径。"""
+    await adb.push(serial, local_path, remote_path)
+    return remote_path
+
+
 async def send_policy_command(serial: str, command: str, params: Optional[dict] = None) -> dict:
     """把策略命令以广播形式发给 Device Owner（DPC 需监听 io.narcifarm.POLICY）。"""
     if command not in POLICY_COMMANDS:
@@ -137,6 +145,8 @@ async def send_policy_command(serial: str, command: str, params: Optional[dict] 
     for k, v in (params or {}).items():
         if isinstance(v, bool):
             args.append(f"--ez {k} {str(v).lower()}")
+        elif isinstance(v, int):
+            args.append(f"--ei {k} {v}")
         else:
             args.append(f"--es {k} {shlex.quote(str(v))}")
     with contextlib.suppress(adb.AdbError):

@@ -159,7 +159,7 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-__version__ = "0.9.10"
+__version__ = "0.9.11"
 app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 
@@ -739,6 +739,30 @@ async def api_policy_commands(_=Depends(_auth.require_user)):
     """支持的设备托管策略命令。"""
     return {"commands": list(devicepolicy.POLICY_COMMANDS),
             "action": devicepolicy.POLICY_ACTION}
+
+
+@app.post("/api/devices/{serial}/ca-cert")
+async def api_install_ca_cert(serial: str, file: UploadFile = File(...),
+                             _=Depends(_auth.require_admin)):
+    """上传并安装 CA 证书：先推到设备，再让 DPC 安装（Device Owner 才有效）。"""
+    from .config import UPLOADS_DIR
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "证书文件为空")
+    name = file.filename or "ca.crt"
+    if not name.lower().endswith((".crt", ".pem", ".cer", ".der")):
+        raise HTTPException(400, "仅支持 .crt/.pem/.cer/.der")
+    saved = UPLOADS_DIR / f"{serial}_{name}"
+    saved.write_bytes(data)
+    remote = f"/data/local/tmp/{serial}_{name}"
+    try:
+        await devicepolicy.push_ca_cert(serial, str(saved), remote)
+    except adb.AdbError as e:
+        raise HTTPException(400, f"推送证书失败: {e}")
+    result = await devicepolicy.send_policy_command(
+        serial, "install_ca_cert", {"path": remote, "alias": name})
+    return {"ok": True, "path": remote, "alias": name, "owner": result.get("owner")}
 
 
 @app.post("/api/devices/{serial}/policy/provision")

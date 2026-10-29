@@ -245,6 +245,35 @@ class Client:
         return self._request("POST", f"/api/devices/{serial}/policy/command",
                              {"command": command, "params": params or {}})
 
+    def install_ca_cert(self, serial: str, cert_path: str, alias: Optional[str] = None) -> dict:
+        """上传并安装 CA 证书（推送到设备后由 DPC 安装）。"""
+        import os
+        if not os.path.exists(cert_path):
+            raise NarciError(f"证书文件不存在: {cert_path}")
+        name = alias or os.path.basename(cert_path)
+        boundary = f"----narcifarm{os.getpid()}"
+        with open(cert_path, "rb") as f:
+            payload = f.read()
+        sep = "\r\n"
+        head = (
+            "--" + boundary + sep +
+            'Content-Disposition: form-data; name="file"; filename="' + name + '"' + sep +
+            "Content-Type: application/x-x509-ca-cert" + sep + sep
+        ).encode("utf-8")
+        tail = (sep + "--" + boundary + "--" + sep).encode("utf-8")
+        body = head + payload + tail
+        url = f"{self.base_url}/api/devices/{serial}/ca-cert"
+        req = urllib.request.Request(url, data=body, method="POST", headers={
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:500]
+            raise NarciError(f"HTTP {e.code}: {detail}") from e
+
     # ---------- 其他 ----------
 
     def plugins(self) -> dict:

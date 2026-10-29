@@ -190,6 +190,22 @@
           <button id="do-provision" class="btn small">设置</button>
           <button id="do-deprovision" class="btn small">移除</button>
         </div>
+        <h4>网络配置（Wi-Fi / VPN / 证书）</h4>
+        <div class="hint">Device Owner 可免用户确认地配置 Wi-Fi；VPN 为「始终开启」模式；证书需先推送证书文件。</div>
+        <div class="form-row">
+          <input id="wifi-ssid" placeholder="Wi-Fi 名称" style="width:150px">
+          <input id="wifi-pass" placeholder="密码(开放网络留空)" style="width:150px">
+          <label class="hint"><input type="checkbox" id="wifi-hidden"> 隐藏</label>
+          <button id="wifi-set" class="btn small">下发 Wi-Fi</button>
+        </div>
+        <div class="form-row">
+          <input id="vpn-pkg" placeholder="VPN 应用包名(留空=关闭始终开启VPN)" style="width:280px">
+          <button id="vpn-set" class="btn small">下发 VPN</button>
+        </div>
+        <div class="form-row">
+          <input type="file" id="ca-file" accept=".crt,.pem,.cer">
+          <button id="ca-push" class="btn small">安装 CA 证书</button>
+        </div>
         <h4>策略命令</h4>
         <div class="form-row">
           <select id="do-command">
@@ -709,12 +725,12 @@
 </div>
 <!-- posthog-js 以 ES module 引入（无构建步骤）：importmap 把裸导入名指到本地 SDK 副本 -->
 <script type="importmap">
-{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=051"}}
+{"imports": {"posthog-js": "/static/vendor/posthog-js/module.full.no-external.js?v=052"}}
 </script>
-<script src="/static/js/api.js?v=051"></script>
-<script type="module" src="/static/js/analytics.js?v=051"></script>
-<script src="/static/js/mirror.js?v=051"></script>
-<script src="/static/js/scenario.js?v=051"></script>
-<script src="/static/js/app.js?v=051"></script>
+<script src="/static/js/api.js?v=052"></script>
+<script type="module" src="/static/js/analytics.js?v=052"></script>
+<script src="/static/js/mirror.js?v=052"></script>
+<script src="/static/js/scenario.js?v=052"></script>
+<script src="/static/js/app.js?v=052"></script>
 </body>
 </html>

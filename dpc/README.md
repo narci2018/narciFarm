@@ -51,8 +51,12 @@ narciFarm 通过 `io.narcifarm.POLICY` 广播下发命令，DPC 监听该 action
 | `set_factory_reset_allowed` | `allowed` (bool) | 允许 / 禁止恢复出厂 |
 | `set_camera_disabled` | `disabled` (bool) | 禁用 / 启用相机 |
 | `set_screen_capture_disabled` | `disabled` (bool) | 禁用 / 启用截屏 |
+| `set_wifi` | `ssid`, `password`?, `hidden` (bool) | 配置 Wi-Fi（免用户确认） |
+| `set_always_on_vpn` | `package`（空=关闭） | 设置始终开启的 VPN |
+| `install_ca_cert` | `path`, `alias`? | 安装 CA 证书（path 为设备上的证书文件） |
+| `clear_ca_certs` | `alias`? | 卸载指定 CA 证书 |
 
-参数通过 `--es`（字符串）与 `--ez`（布尔）传递。
+参数通过 `--es`（字符串）、`--ez`（布尔）与 `--ei`（整数）传递。
 
 ## 不想自建？用 TestDPC
 

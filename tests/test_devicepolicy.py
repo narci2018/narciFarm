@@ -215,3 +215,82 @@ def test_policy_command_surfaces_adberror(api, monkeypatch):
                 json={"command": "lock_now"}, headers=headers)
     assert r.status_code == 400
     assert "Device Owner" in r.json()["detail"]
+
+
+# ---------- Wi-Fi / VPN / 证书 ----------
+
+def test_policy_commands_include_network():
+    for c in ("set_wifi", "set_always_on_vpn", "install_ca_cert", "clear_ca_certs"):
+        assert c in devicepolicy.POLICY_COMMANDS
+
+
+def test_push_ca_cert_uses_adb_push(monkeypatch):
+    seen = {}
+
+    async def fake_push(serial, local, remote):
+        seen.update(serial=serial, local=local, remote=remote)
+
+    monkeypatch.setattr(adb, "push", fake_push)
+    out = asyncio.run(devicepolicy.push_ca_cert("S", "/tmp/ca.crt"))
+    assert out.endswith("/tmp/narci_ca.crt") or out == "/data/local/tmp/narci_ca.crt"
+    assert seen["serial"] == "S"
+
+
+def test_ca_cert_broadcast_sends_path(monkeypatch):
+    seen = []
+
+    async def fake_shell(serial, cmd, timeout=30):
+        return 0, SAMPLE_DUMPSYS
+
+    async def fake_ok(args, timeout=20, device=None):
+        seen.append(" ".join(args))
+        return b""
+
+    monkeypatch.setattr(adb, "shell", fake_shell)
+    monkeypatch.setattr(adb, "_run_ok", fake_ok)
+    asyncio.run(devicepolicy.send_policy_command(
+        "S", "install_ca_cert", {"path": "/data/local/tmp/ca.crt", "alias": "ca.crt"}))
+    assert any("--es command install_ca_cert" in c for c in seen)
+    assert any("path" in c for c in seen)
+
+
+def test_ca_cert_endpoint_rejects_bad_extension(api, tmp_path):
+    import io
+    tc, headers = api
+    bad = tc.post("/api/devices/DEV01/ca-cert",
+                  files={"file": ("cert.exe", io.BytesIO(b"x"), "application/octet-stream")},
+                  headers=headers)
+    assert bad.status_code == 400
+
+
+def test_ca_cert_endpoint_rejects_empty(api):
+    import io
+    tc, headers = api
+    empty = tc.post("/api/devices/DEV01/ca-cert",
+                    files={"file": ("ca.crt", io.BytesIO(b""), "application/x-x509-ca-cert")},
+                    headers=headers)
+    assert empty.status_code == 400
+
+
+def test_ca_cert_endpoint_installs(api, tmp_path, monkeypatch):
+    import io
+    monkeypatch.setenv("NARCI_UPLOADS_DIR", str(tmp_path))
+    pushed = {}
+
+    async def fake_push(serial, local, remote):
+        pushed["remote"] = remote
+        Path(local).write_bytes(b"CERTDATA")
+
+    async def fake_cmd(serial, command, params):
+        return {"ok": True, "command": command, "owner": "com.x.dpc"}
+
+    from pathlib import Path
+    monkeypatch.setattr(devicepolicy, "push_ca_cert", fake_push)
+    monkeypatch.setattr(devicepolicy, "send_policy_command", fake_cmd)
+    tc, headers = api
+    r = tc.post("/api/devices/DEV01/ca-cert",
+files={"file": ("ca.crt", io.BytesIO(b"-----BEGIN CERTIFICATE-----AA-----END CERTIFICATE-----"),
+                        "application/x-x509-ca-cert")},
+                headers=headers)
+    assert r.status_code == 200
+    assert r.json()["path"] == pushed["remote"]
