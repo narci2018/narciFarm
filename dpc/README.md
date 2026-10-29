@@ -3,8 +3,9 @@
 narciFarm 的「设备托管（Device Owner）」功能需要设备上有一个 **DPC（设备策略控制器）应用**。
 本目录提供一份最小可用的参考 DPC，实现 narciFarm 的广播契约。
 
-> **状态说明**：本 DPC 源码未在本环境编译验证（本地没有 Android SDK）。
-> 代码按标准 Android DevicePolicyManager API 编写，但请自行构建并测试。
+> **状态说明**：本 DPC 由 CI 工作流 `.github/workflows/dpc.yml` 与 release 工作流自动构建，
+> **已通过编译验证**（AGP 8.5.2 + Kotlin 1.9.24，compileSdk 34）。
+> Release 页面会附带构建好的 `narciFarm-dpc.apk`，可直接安装。
 > 若不想自建，也可以改用 Google 的 **TestDPC**（见下文）。
 
 ## 构建

@@ -159,7 +159,7 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-__version__ = "0.9.11"
+__version__ = "0.9.12"
 app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 
