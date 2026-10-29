@@ -8,6 +8,9 @@ __pycache__/
 
 # PyInstaller 产物
 build/
+dpc/narci_dpc/app/build/
+dpc/narci_dpc/local.properties
+dpc/narci_dpc/.gradle/
 dist/
 build_stage/
 
