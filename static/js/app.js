@@ -67,6 +67,9 @@ async function init() {
   bindDevTools();
   bindMonitor();
   bindOps();
+  bindPhase2();
+  bindPhase3();
+  bindPhase4();
   bindReports();
   $('login-btn').onclick = doLogin;
   $('login-pass').onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
@@ -151,7 +154,7 @@ function renderDeviceList() {
   for (const d of State.devices) {
     const li = document.createElement('li');
     li.innerHTML = `
-      <input type="checkbox" ${State.selected.has(d.serial) ? 'checked' : ''}>
+      <input type="checkbox" class="device-cb" value="${d.serial}" ${State.selected.has(d.serial) ? 'checked' : ''}>
       <span class="dstate ${d.state}"></span>
       <span class="dserial" title="${esc(d.serial)}${d.notes ? ' · ' + esc(d.notes) : ''}">${esc(d.serial)}</span>
       <span class="dmodel">${esc(d.model || d.android_version || '')}</span>
@@ -1864,7 +1867,14 @@ async function loadStats() {
 // ---------- 运营: 账号 / 内容 / 分发 / 数据 / 标签 / 反向转发 ----------
 
 async function loadOps() {
-  await Promise.all([loadAccounts(), loadContents(), loadDistTasks(), loadMetrics(), loadTags()]);
+  await Promise.all([
+    loadAccounts(), loadContents(), loadDistTasks(), loadMetrics(), loadTags(),
+    loadReplyRules(), loadTemplates(), loadInteractions(),
+    loadPublishTemplates(), loadRiskStatus(),
+    loadCompetitorSources(), loadCompetitorContents(),
+    loadAbTests(), loadSentimentSummary(), loadSentimentMessages(),
+    loadRelayFlows()
+  ]);
   fillOpsDeviceSelects();
 }
 
@@ -1882,64 +1892,179 @@ function fillOpsDeviceSelects() {
 async function loadAccounts() {
   try {
     const accounts = await API.get('/api/accounts');
+    State._accounts = accounts;  // 缓存供批量分发使用
     const tb = $('ac-table').querySelector('tbody');
-    tb.innerHTML = accounts.length ? '' : '<tr><td colspan="6" class="hint">暂无账号</td></tr>';
+    tb.innerHTML = accounts.length ? '' : '<tr><td colspan="7" class="hint">暂无账号</td></tr>';
     for (const a of accounts) {
       const tr = document.createElement('tr');
       tr.innerHTML = `<td>${a.id}</td><td>${esc(a.platform)}</td><td>${esc(a.name)}</td>
+        <td>${esc(a.username || '—')}</td>
         <td>${esc((a.devices || []).map(d => d.slice(0, 12)).join(', ') || '—')}</td>
         <td>${a.status === 'active' ? '✅' : '⏸'}</td>
-        <td><button class="btn small danger" data-del="${a.id}">删</button></td>`;
+        <td>
+          <button class="btn small" data-edit-ac="${a.id}">编辑</button>
+          <button class="btn small danger" data-del="${a.id}">删</button>
+        </td>`;
       tb.appendChild(tr);
     }
     tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
       await API.del(`/api/accounts/${b.dataset.del}`);
       loadAccounts();
     });
+    tb.querySelectorAll('[data-edit-ac]').forEach(b => b.onclick = () => editAccount(
+      accounts.find(a => a.id === parseInt(b.dataset.editAc))));
+    // 填充分发选择器
     const dt = $('dt-account');
     const cur = dt.value;
     dt.innerHTML = accounts.map(a => `<option value="${a.id}">#${a.id} ${esc(a.name)} (${esc(a.platform)})</option>`).join('');
     if (cur) dt.value = cur;
+    // 批量分发选择器
+    fillBatchAccountCheckboxes(accounts);
+    // 互动管理账号选择器
+    const iaSel = $('ia-account');
+    if (iaSel) {
+      const iacur = iaSel.value;
+      iaSel.innerHTML = '<option value="0">全部账号</option>' +
+        accounts.map(a => `<option value="${a.id}">${esc(a.name)} (${esc(a.platform)})</option>`).join('');
+      if (iacur) iaSel.value = iacur;
+    }
   } catch (e) {}
+}
+
+function fillBatchAccountCheckboxes(accounts) {
+  const box = $('dt-batch-selected');
+  if (!box) return;
+  box.innerHTML = accounts.map(a =>
+    `<label class="hint" style="margin-right:8px"><input type="checkbox" class="dt-batch-ac" value="${a.id}" checked> ${esc(a.name)}</label>`
+  ).join('');
+}
+
+function editAccount(a) {
+  if (!a) return;
+  $('ac-platform').value = a.platform;
+  $('ac-name').value = a.name;
+  $('ac-username').value = a.username || '';
+  $('ac-token').value = a.api_token || '';
+  $('ac-base').value = a.api_base || '';
+  // 切换按钮文字
+  const btn = $('ac-add');
+  btn.textContent = '更新账号';
+  btn.onclick = async () => {
+    const platform = $('ac-platform').value.trim();
+    const name = $('ac-name').value.trim();
+    if (!platform || !name) return toast('请填写平台和名称', 'error');
+    await API.put(`/api/accounts/${a.id}`, {
+      platform, name, username: $('ac-username').value,
+      api_token: $('ac-token').value, api_base: $('ac-base').value
+    });
+    toast('账号已更新', 'ok');
+    btn.textContent = '添加账号';
+    btn.onclick = null;
+    bindOps();
+    loadAccounts();
+  };
 }
 
 async function loadContents() {
   try {
     const contents = await API.get('/api/contents');
+    State._contents = contents;
     const tb = $('ct-table').querySelector('tbody');
-    tb.innerHTML = contents.length ? '' : '<tr><td colspan="4" class="hint">暂无内容</td></tr>';
+    tb.innerHTML = contents.length ? '' : '<tr><td colspan="5" class="hint">暂无内容</td></tr>';
+    const statusLabels = {
+      draft: '📝 草稿', ready: '✅ 就绪', pending: '⏳ 待发',
+      published: '🚀 已发', failed: '❌ 失败'
+    };
     for (const c of contents) {
       const tr = document.createElement('tr');
+      const st = statusLabels[c.status] || c.status || '就绪';
       tr.innerHTML = `<td>${c.id}</td><td>${esc(c.title)}</td><td>${esc(c.type)}</td>
-        <td><button class="btn small danger" data-del="${c.id}">删</button></td>`;
+        <td>${st}</td>
+        <td>
+          <button class="btn small" data-edit-ct="${c.id}">编辑</button>
+          <button class="btn small danger" data-del="${c.id}">删</button>
+        </td>`;
       tb.appendChild(tr);
     }
     tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
       await API.del(`/api/contents/${b.dataset.del}`);
       loadContents();
     });
+    tb.querySelectorAll('[data-edit-ct]').forEach(b => b.onclick = () => editContent(
+      contents.find(c => c.id === parseInt(b.dataset.editCt))));
+    // 填充分发选择器
     const dt = $('dt-content');
     const cur = dt.value;
     dt.innerHTML = contents.map(c => `<option value="${c.id}">#${c.id} ${esc(c.title)}</option>`).join('');
     if (cur) dt.value = cur;
+    // 批量分发选择器
+    const bdt = $('dt-batch-content');
+    if (bdt) {
+      const bcur = bdt.value;
+      bdt.innerHTML = contents.map(c => `<option value="${c.id}">#${c.id} ${esc(c.title)}</option>`).join('');
+      if (bcur) bdt.value = bcur;
+    }
   } catch (e) {}
+}
+
+function editContent(c) {
+  if (!c) return;
+  $('ct-title').value = c.title;
+  $('ct-type').value = c.type;
+  $('ct-text').value = c.text || '';
+  const btn = $('ct-add');
+  btn.textContent = '更新内容';
+  const origOnclick = btn.onclick;
+  btn.onclick = async () => {
+    const title = $('ct-title').value.trim();
+    if (!title) return toast('请填写标题', 'error');
+    await API.put(`/api/contents/${c.id}`, {
+      title, type: $('ct-type').value, text: $('ct-text').value
+    });
+    toast('内容已更新', 'ok');
+    btn.textContent = '添加内容';
+    btn.onclick = origOnclick;
+    bindOps();
+    loadContents();
+  };
 }
 
 async function loadDistTasks() {
   try {
     const tasks = await API.get('/api/distribution-tasks');
     const tb = $('dt-table').querySelector('tbody');
-    tb.innerHTML = tasks.length ? '' : '<tr><td colspan="6" class="hint">暂无任务</td></tr>';
+    tb.innerHTML = tasks.length ? '' : '<tr><td colspan="7" class="hint">暂无任务</td></tr>';
+    const statusLabels = {
+      pending: '⏳ 待执行', published: '🚀 已发布', failed: '❌ 失败', cancelled: '🚫 已取消'
+    };
     for (const t of tasks) {
       const tr = document.createElement('tr');
       const st = t.scheduled_at ? new Date(t.scheduled_at * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+      const statusText = statusLabels[t.status] || t.status;
+      const retry = `${t.retry_count || 0}/${t.max_retries || 3}`;
+      const canRetry = t.status === 'failed' && (t.retry_count || 0) < (t.max_retries || 3);
+      const canCancel = t.status === 'pending';
       tr.innerHTML = `<td>${t.id}</td><td>${esc(t.content_title || '')}</td><td>${esc(t.account_name || '')}</td>
-        <td class="hint">${st}</td><td>${esc(t.status)}</td>
-        <td><button class="btn small danger" data-del="${t.id}">删</button></td>`;
+        <td class="hint">${st}</td><td>${statusText}</td><td class="hint">${retry}</td>
+        <td>
+          ${canRetry ? `<button class="btn small" data-retry="${t.id}">重试</button>` : ''}
+          ${canCancel ? `<button class="btn small" data-cancel="${t.id}">取消</button>` : ''}
+          <button class="btn small danger" data-del="${t.id}">删</button>
+        </td>`;
       tb.appendChild(tr);
     }
     tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
       await API.del(`/api/distribution-tasks/${b.dataset.del}`);
+      loadDistTasks();
+    });
+    tb.querySelectorAll('[data-retry]').forEach(b => b.onclick = async () => {
+      await API.post(`/api/distribution-tasks/${b.dataset.retry}/retry`);
+      toast('已重新排队', 'ok');
+      loadDistTasks();
+    });
+    tb.querySelectorAll('[data-cancel]').forEach(b => b.onclick = async () => {
+      await API.post(`/api/distribution-tasks/${b.dataset.cancel}/cancel`);
+      toast('已取消', 'ok');
       loadDistTasks();
     });
   } catch (e) {}
@@ -2029,13 +2154,49 @@ function bindOps() {
   $('dt-add').onclick = async () => {
     const content_id = parseInt($('dt-content').value);
     const account_id = parseInt($('dt-account').value);
-    const timeStr = $('dt-time').value.trim();
+    const timeStr = $('dt-time').value;
     if (!content_id || !account_id || !timeStr) return toast('请完整填写', 'error');
-    const d = new Date(timeStr.replace(' ', 'T'));
+    const d = new Date(timeStr);
     if (isNaN(d.getTime())) return toast('时间格式错误', 'error');
     await API.post('/api/distribution-tasks', { content_id, account_id, scheduled_at: d.getTime() / 1000 });
     toast('分发任务已创建', 'ok');
     loadDistTasks();
+  };
+  // 批量分发
+  const batchGo = $('dt-batch-go');
+  if (batchGo) batchGo.onclick = async () => {
+    const content_id = parseInt($('dt-batch-content').value);
+    const account_ids = [...document.querySelectorAll('.dt-batch-ac:checked')].map(c => parseInt(c.value));
+    if (!content_id || !account_ids.length) return toast('请选择内容和至少一个账号', 'error');
+    const timeStr = $('dt-batch-time').value;
+    if (!timeStr) return toast('请选择发布时间', 'error');
+    const d = new Date(timeStr);
+    if (isNaN(d.getTime())) return toast('时间格式错误', 'error');
+    const interval_minutes = parseInt($('dt-batch-interval').value) || 0;
+    const r = await API.post('/api/distribution-tasks/batch', {
+      content_id, account_ids, scheduled_at: d.getTime() / 1000,
+      interval_minutes, max_retries: 3
+    });
+    toast(`已创建 ${r.count} 个分发任务`, 'ok');
+    loadDistTasks();
+  };
+  // 立即发布
+  const batchNow = $('dt-batch-now');
+  if (batchNow) batchNow.onclick = async () => {
+    const content_id = parseInt($('dt-batch-content').value);
+    const account_ids = [...document.querySelectorAll('.dt-batch-ac:checked')].map(c => parseInt(c.value));
+    if (!content_id || !account_ids.length) return toast('请选择内容和至少一个账号', 'error');
+    toast('正在发布…', 'ok');
+    const r = await API.post('/api/distribution-tasks/publish-now', { content_id, account_ids });
+    const ok = r.results.filter(t => t.status === 'published').length;
+    toast(`发布完成: ${ok}/${account_ids.length} 成功`, ok === account_ids.length ? 'ok' : 'warn');
+    loadDistTasks();
+    loadContents();
+  };
+  // 全选/取消全选
+  const batchAll = $('dt-batch-all');
+  if (batchAll) batchAll.onchange = () => {
+    document.querySelectorAll('.dt-batch-ac').forEach(c => c.checked = batchAll.checked);
   };
   $('tg-set').onclick = async () => {
     const serial = $('tg-device').value;
@@ -2054,6 +2215,297 @@ function bindOps() {
     await API.post(`/api/devices/${encodeURIComponent(serial)}/reverse`, { device_port, host_port });
     toast(`反向转发已建立: 设备:${device_port} → PC:${host_port}`, 'ok');
   };
+}
+
+// ---------- 阶段二: 分发分析 / 互动管理 / 自动回复 / 模板 ----------
+
+async function loadDistAnalytics() {
+  try {
+    const days = parseInt($('da-days').value) || 30;
+    const data = await API.get(`/api/distribution/analytics?days=${days}`);
+    const rate = data.success_rate;
+    $('da-summary').innerHTML =
+      `近 <strong>${data.period_days}</strong> 天: 共 <strong>${data.total}</strong> 条分发, ` +
+      `成功 <strong>${data.success}</strong>, 失败 <strong>${data.failed}</strong>, ` +
+      `成功率 <strong style="color:${rate >= 80 ? '#4caf50' : rate >= 50 ? '#ff9800' : '#f44336'}">${rate}%</strong>`;
+    // 平台表格
+    const tb = $('da-platform-table').querySelector('tbody');
+    tb.innerHTML = data.by_platform.length ? '' : '<tr><td colspan="4" class="hint">暂无数据</td></tr>';
+    for (const p of data.by_platform) {
+      const tr = document.createElement('tr');
+      const r = p.total ? Math.round(p.ok / p.total * 100) : 0;
+      tr.innerHTML = `<td>${esc(p.platform)}</td><td>${p.total}</td><td>${p.ok}</td><td>${r}%</td>`;
+      tb.appendChild(tr);
+    }
+    // 时段柱状图
+    drawHourChart($('da-hour-chart'), data.by_hour);
+  } catch (e) {}
+}
+
+function drawHourChart(canvas, hourData) {
+  if (!canvas || !canvas.getContext) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const hours = Array(24).fill(0);
+  for (const h of hourData) hours[h.hr] = h.cnt;
+  const max = Math.max(...hours, 1);
+  const barW = (W - 40) / 24;
+  ctx.fillStyle = '#888';
+  ctx.font = '10px sans-serif';
+  for (let i = 0; i < 24; i++) {
+    const barH = (hours[i] / max) * (H - 25);
+    const x = 20 + i * barW;
+    const y = H - 15 - barH;
+    ctx.fillStyle = hours[i] ? '#42a5f5' : '#333';
+    ctx.fillRect(x + 1, y, barW - 2, barH);
+    if (i % 3 === 0) {
+      ctx.fillStyle = '#888';
+      ctx.fillText(`${i}`, x, H - 2);
+    }
+  }
+}
+
+async function loadInteractions() {
+  try {
+    const account_id = parseInt($('ia-account')?.value) || 0;
+    const kind = $('ia-kind')?.value || '';
+    const status = $('ia-status')?.value || '';
+    const msgs = await API.get(`/api/interactions?account_id=${account_id}&kind=${kind}&status=${status}`);
+    const tb = $('ia-table').querySelector('tbody');
+    tb.innerHTML = msgs.length ? '' : '<tr><td colspan="6" class="hint">暂无消息</td></tr>';
+    const statusLabels = { unread: '🔴 未读', read: '🔵 已读', replied: '🟢 已回复' };
+    for (const m of msgs) {
+      const tr = document.createElement('tr');
+      const st = statusLabels[m.status] || m.status;
+      tr.innerHTML = `<td class="hint">${esc(m.created_at || '')}</td>
+        <td>${esc(m.account_name || '')}</td>
+        <td>${m.kind === 'dm' ? '📩' : '💬'}</td>
+        <td title="${esc(m.author_name)}: ${esc(m.content)}">${esc((m.content || '').slice(0, 40))}${m.content?.length > 40 ? '…' : ''}</td>
+        <td>${st}</td>
+        <td>
+          ${m.status === 'unread' ? `<button class="btn small" data-read="${m.id}">已读</button>` : ''}
+          ${m.status !== 'replied' ? `<button class="btn small" data-reply="${m.id}">回复</button>` : ''}
+          ${m.status !== 'replied' ? `<button class="btn small" data-autoreply="${m.id}">自动</button>` : ''}
+        </td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-read]').forEach(b => b.onclick = async () => {
+      await API.post(`/api/interactions/${b.dataset.read}/read`);
+      loadInteractions();
+    });
+    tb.querySelectorAll('[data-reply]').forEach(b => b.onclick = async () => {
+      const text = await showPrompt({ title: '回复消息', message: '输入回复内容:' });
+      if (!text) return;
+      await API.post(`/api/interactions/${b.dataset.reply}/reply`, { reply_text: text });
+      toast('已回复', 'ok');
+      loadInteractions();
+    });
+    tb.querySelectorAll('[data-autoreply]').forEach(b => b.onclick = async () => {
+      const r = await API.post(`/api/interactions/${b.dataset.autoreply}/auto-reply`, {});
+      if (r.ok) toast(`已自动回复: ${r.reply_text.slice(0, 30)}`, 'ok');
+      else toast('无匹配规则', 'warn');
+      loadInteractions();
+    });
+    // 更新未读徽章
+    const unread = await API.get('/api/interactions/unread-count');
+    const badge = $('ia-unread-badge');
+    if (badge) badge.textContent = unread.count > 0 ? `(${unread.count} 条未读)` : '';
+  } catch (e) {}
+}
+
+async function loadReplyRules() {
+  try {
+    const rules = await API.get('/api/reply-rules');
+    const tb = $('rr-table').querySelector('tbody');
+    tb.innerHTML = rules.length ? '' : '<tr><td colspan="7" class="hint">暂无规则</td></tr>';
+    for (const r of rules) {
+      const tr = document.createElement('tr');
+      let kws = '';
+      try { kws = JSON.parse(r.keywords).join(', '); } catch (e) { kws = r.keywords; }
+      tr.innerHTML = `<td>${esc(r.name)}</td>
+        <td>${r.match_type === 'keyword' ? '关键词' : '全部'}</td>
+        <td>${esc(kws)}</td>
+        <td>${esc((r.reply_text || '').slice(0, 30))}</td>
+        <td>${r.priority}</td>
+        <td>${r.enabled ? '✅' : '⏸'}</td>
+        <td>
+          <button class="btn small" data-toggle-rr="${r.id}">${r.enabled ? '停用' : '启用'}</button>
+          <button class="btn small danger" data-del-rr="${r.id}">删</button>
+        </td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-del-rr]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/reply-rules/${b.dataset.delRr}`);
+      loadReplyRules();
+    });
+    tb.querySelectorAll('[data-toggle-rr]').forEach(b => b.onclick = async () => {
+      const id = b.dataset.toggleRr;
+      const enabled = b.textContent === '停用' ? 0 : 1;
+      await API.put(`/api/reply-rules/${id}`, { enabled });
+      loadReplyRules();
+    });
+  } catch (e) {}
+}
+
+async function loadTemplates() {
+  try {
+    const tpls = await API.get('/api/content-templates');
+    const tb = $('tpl-table').querySelector('tbody');
+    tb.innerHTML = tpls.length ? '' : '<tr><td colspan="5" class="hint">暂无模板</td></tr>';
+    for (const t of tpls) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.name)}</td><td>${esc(t.platform || '通用')}</td>
+        <td>${esc((t.title_template || '').slice(0, 30))}</td>
+        <td><button class="btn small danger" data-del-tpl="${t.id}">删</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-del-tpl]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/content-templates/${b.dataset.delTpl}`);
+      loadTemplates();
+    });
+    // 预览选择器
+    const sel = $('tpl-preview-select');
+    if (sel) {
+      sel.innerHTML = tpls.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+    }
+  } catch (e) {}
+}
+
+function bindPhase2() {
+  // 分发分析
+  const daRefresh = $('da-refresh');
+  if (daRefresh) daRefresh.onclick = loadDistAnalytics;
+  const daDays = $('da-days');
+  if (daDays) daDays.onchange = loadDistAnalytics;
+
+  // 互动管理
+  const iaRefresh = $('ia-refresh');
+  if (iaRefresh) iaRefresh.onclick = loadInteractions;
+  const iaAutoAll = $('ia-auto-all');
+  if (iaAutoAll) iaAutoAll.onclick = async () => {
+    const msgs = await API.get('/api/interactions?status=unread');
+    let count = 0;
+    for (const m of msgs) {
+      const r = await API.post(`/api/interactions/${m.id}/auto-reply`, {});
+      if (r.ok) count++;
+    }
+    toast(`自动回复了 ${count} 条消息`, count ? 'ok' : 'warn');
+    loadInteractions();
+  };
+
+  // 自动回复规则
+  const rrAdd = $('rr-add');
+  if (rrAdd) rrAdd.onclick = async () => {
+    const name = $('rr-name').value.trim();
+    const reply = $('rr-reply').value.trim();
+    if (!name || !reply) return toast('请填写名称和回复内容', 'error');
+    const matchType = $('rr-match').value;
+    const keywords = matchType === 'keyword'
+      ? JSON.stringify($('rr-keywords').value.split(/[,，]/).map(s => s.trim()).filter(Boolean))
+      : '[]';
+    await API.post('/api/reply-rules', {
+      name, reply_text: reply, match_type: matchType,
+      keywords, priority: parseInt($('rr-priority').value) || 0
+    });
+    toast('规则已添加', 'ok');
+    $('rr-name').value = ''; $('rr-keywords').value = ''; $('rr-reply').value = '';
+    loadReplyRules();
+  };
+
+  // 内容模板
+  const tplAdd = $('tpl-add');
+  if (tplAdd) tplAdd.onclick = async () => {
+    const name = $('tpl-name').value.trim();
+    if (!name) return toast('请填写模板名称', 'error');
+    let vars = '{}';
+    const varsInput = $('tpl-vars').value.trim();
+    if (varsInput) {
+      try { JSON.parse(varsInput); vars = varsInput; }
+      catch (e) { return toast('变量 JSON 格式错误', 'error'); }
+    }
+    await API.post('/api/content-templates', {
+      name, platform: $('tpl-platform').value,
+      title_template: $('tpl-title').value,
+      text_template: $('tpl-text').value,
+      variables: vars
+    });
+    toast('模板已添加', 'ok');
+    $('tpl-name').value = ''; $('tpl-title').value = ''; $('tpl-text').value = ''; $('tpl-vars').value = '';
+    loadTemplates();
+  };
+  const tplPreview = $('tpl-preview-go');
+  if (tplPreview) tplPreview.onclick = async () => {
+    const tplId = parseInt($('tpl-preview-select').value);
+    if (!tplId) return toast('请选择模板', 'error');
+    let vars = {};
+    const varsInput = $('tpl-preview-vars').value.trim();
+    if (varsInput) {
+      try { vars = JSON.parse(varsInput); }
+      catch (e) { return toast('变量 JSON 格式错误', 'error'); }
+    }
+    const r = await API.post(`/api/content-templates/${tplId}/render`, { variables: vars });
+    $('tpl-preview-result').textContent = `标题: ${r.title} | 正文: ${r.text.slice(0, 60)}`;
+  };
+}
+
+// ---------- 阶段三: 发布场景模板 / 风控状态 ----------
+
+async function loadPublishTemplates() {
+  try {
+    const tpls = await API.get('/api/publish-templates');
+    const tb = $('pt-table').querySelector('tbody');
+    tb.innerHTML = tpls.length ? '' : '<tr><td colspan="5" class="hint">暂无预置模板</td></tr>';
+    for (const t of tpls) {
+      const tr = document.createElement('tr');
+      const vars = (t.variables || []).join(', ') || '—';
+      tr.innerHTML = `<td>${esc(t.name)}</td><td>${esc(t.platform || '通用')}</td>
+        <td>${(t.steps || []).length}</td><td class="hint">${esc(vars)}</td>
+        <td><button class="btn small primary" data-pt-create="${esc(t.file)}">创建为场景</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-pt-create]').forEach(b => b.onclick = async () => {
+      const name = await showPrompt({ title: '场景名称', message: '为这个模板创建的场景命名:' });
+      if (name === null) return;
+      const r = await API.post('/api/publish-templates/create-scenario',
+        { filename: b.dataset.ptCreate, name });
+      toast(`场景已创建: ${r.name} (ID: ${r.scenario_id})`, 'ok');
+    });
+  } catch (e) {}
+}
+
+async function loadRiskStatus() {
+  try {
+    const states = await API.get('/api/risk/status');
+    const serials = Object.keys(states);
+    const tb = $('risk-table').querySelector('tbody');
+    const atRisk = serials.filter(s => states[s].risk);
+    $('risk-summary').textContent = serials.length
+      ? `${atRisk.length} 台设备处于风控状态 / ${serials.length} 台已记录`
+      : '暂无风控记录';
+    tb.innerHTML = serials.length ? '' : '<tr><td colspan="5" class="hint">暂无记录</td></tr>';
+    for (const serial of serials) {
+      const s = states[serial];
+      const tr = document.createElement('tr');
+      const dur = s.since ? Math.round((Date.now() / 1000 - s.since) / 60) + ' 分钟' : '—';
+      tr.innerHTML = `<td class="dserial">${esc(serial)}</td>
+        <td>${s.risk ? '🔴 风控中' : '🟢 正常'}</td>
+        <td>${esc(s.reason || '—')}</td>
+        <td class="hint">${dur}</td>
+        <td>${s.risk ? `<button class="btn small" data-risk-clear="${esc(serial)}">解除</button>` : ''}</td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-risk-clear]').forEach(b => b.onclick = async () => {
+      await API.post(`/api/risk/clear/${encodeURIComponent(b.dataset.riskClear)}`);
+      toast('风控已解除', 'ok');
+      loadRiskStatus();
+    });
+  } catch (e) {}
+}
+
+function bindPhase3() {
+  const riskRefresh = $('risk-refresh');
+  if (riskRefresh) riskRefresh.onclick = loadRiskStatus;
 }
 
 init();
@@ -2231,5 +2683,300 @@ function bindMonitor() {
     await API.put('/api/webhook', { url: $('wh-url').value.trim(), enabled: $('wh-enabled').checked });
     await API.post('/api/webhook/test');
     toast('测试消息已发送', 'ok');
+  };
+}
+
+// ---------- 阶段四: 竞品采集 / A-B测试 / 情感分析 / 多机协作 ----------
+
+async function loadCompetitorSources() {
+  try {
+    const sources = await API.get('/api/competitor-sources');
+    const tb = $('cs-table').querySelector('tbody');
+    tb.innerHTML = sources.length ? '' : '<tr><td colspan="7" class="hint">暂无采集源</td></tr>';
+    for (const s of sources) {
+      const tr = document.createElement('tr');
+      const lastT = s.last_collect ? new Date(s.last_collect * 1000).toLocaleString('zh-CN', {hour12:false}) : '—';
+      const err = s.last_error ? ` <span style="color:var(--bad)">错误</span>` : '正常';
+      tr.innerHTML = `<td>${esc(s.name)}</td><td>${esc(s.platform||'')}</td><td>${s.source_type}</td>
+        <td>${s.total_collected||0}</td><td>${lastT}</td><td>${err}</td>
+        <td><button class="btn small" data-collect="${s.id}">采集</button>
+        <button class="btn small danger" data-del="${s.id}">删</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-collect]').forEach(b => b.onclick = async () => {
+      toast('正在采集…', 'info');
+      const r = await API.post(`/api/competitor-sources/${b.dataset.collect}/collect`);
+      toast(`采集完成，新增 ${r.new_items} 条`, 'ok');
+      loadCompetitorSources();
+      loadCompetitorContents();
+    });
+    tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/competitor-sources/${b.dataset.del}`);
+      loadCompetitorSources();
+    });
+    // 更新来源下拉
+    const sel = $('cc-source');
+    sel.innerHTML = '<option value="0">全部来源</option>';
+    for (const s of sources) {
+      sel.innerHTML += `<option value="${s.id}">${esc(s.name)}</option>`;
+    }
+  } catch (e) {}
+}
+
+async function loadCompetitorContents() {
+  try {
+    const sid = parseInt($('cc-source').value) || 0;
+    const status = $('cc-status').value;
+    const params = new URLSearchParams();
+    if (sid) params.set('source_id', sid);
+    if (status) params.set('status', status);
+    const items = await API.get(`/api/competitor-contents?${params}`);
+    const tb = $('cc-table').querySelector('tbody');
+    tb.innerHTML = items.length ? '' : '<tr><td colspan="6" class="hint">暂无内容</td></tr>';
+    for (const c of items) {
+      const tr = document.createElement('tr');
+      const statusLabel = {new:'<span style="color:var(--ok)">新</span>', reviewed:'已审阅', promoted:'已转用'}[c.status] || c.status;
+      tr.innerHTML = `<td title="${esc(c.content||'').slice(0,100)}">${esc(c.title)}</td>
+        <td>${esc(c.source_name||'')}</td><td>${esc(c.platform||'')}</td><td>${esc(c.author||'')}</td>
+        <td>${statusLabel}</td>
+        <td>${c.status==='new' ? `<button class="btn small primary" data-promote="${c.id}">转为内容</button>` : ''}
+        <button class="btn small danger" data-del="${c.id}">删</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-promote]').forEach(b => b.onclick = async () => {
+      await API.post(`/api/competitor-contents/${b.dataset.promote}/promote`);
+      toast('已转为自有内容', 'ok');
+      loadCompetitorContents();
+    });
+    tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/competitor-contents/${b.dataset.del}`);
+      loadCompetitorContents();
+    });
+  } catch (e) {}
+}
+
+async function loadAbTests() {
+  try {
+    const tests = await API.get('/api/ab-tests');
+    const tb = $('abt-table').querySelector('tbody');
+    tb.innerHTML = tests.length ? '' : '<tr><td colspan="5" class="hint">暂无测试</td></tr>';
+    const statusLabels = {draft:'草稿', running:'进行中', concluded:'已结束'};
+    for (const t of tests) {
+      const tr = document.createElement('tr');
+      const ct = new Date(t.created_at).toLocaleString('zh-CN', {hour12:false});
+      tr.innerHTML = `<td>${esc(t.name)}</td><td>${statusLabels[t.status]||t.status}</td>
+        <td>${(t.variants||[]).length}</td><td>${ct}</td>
+        <td><button class="btn small" data-view="${t.id}">详情</button>
+        ${t.status==='draft' ? `<button class="btn small primary" data-launch="${t.id}">启动</button>` : ''}
+        ${t.status==='running' ? `<button class="btn small" data-analytics="${t.id}">分析</button>
+        <button class="btn small primary" data-conclude="${t.id}">结束</button>` : ''}
+        <button class="btn small danger" data-del="${t.id}">删</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-view]').forEach(b => b.onclick = () => viewAbTest(parseInt(b.dataset.view)));
+    tb.querySelectorAll('[data-launch]').forEach(b => b.onclick = async () => {
+      await API.post(`/api/ab-tests/${b.dataset.launch}/launch`, {scheduled_at: Date.now()/1000});
+      toast('测试已启动', 'ok');
+      loadAbTests();
+    });
+    tb.querySelectorAll('[data-analytics]').forEach(b => b.onclick = () => viewAbTest(parseInt(b.dataset.analytics)));
+    tb.querySelectorAll('[data-conclude]').forEach(b => b.onclick = async () => {
+      await API.post(`/api/ab-tests/${b.dataset.conclude}/conclude`, {});
+      toast('测试已结束', 'ok');
+      loadAbTests();
+    });
+    tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/ab-tests/${b.dataset.del}`);
+      loadAbTests();
+    });
+  } catch (e) {}
+}
+
+async function viewAbTest(testId) {
+  try {
+    const data = await API.get(`/api/ab-tests/${testId}/analytics`);
+    const detail = $('abt-detail');
+    if (!data.variants || !data.variants.length) {
+      detail.innerHTML = '<div class="hint">该测试暂无变体。在下方添加变体后启动测试。</div>' +
+        `<div class="form-row" style="margin-top:8px">
+        <input id="abv-key" placeholder="变体标识(A/B/C)" style="width:100px">
+        <input id="abv-title" placeholder="标题" style="width:160px">
+        <input id="abv-text" placeholder="正文" style="flex:1">
+        <select id="abv-account"></select>
+        <button class="btn small primary" id="abv-add">添加变体</button></div>`;
+    } else {
+      let html = '<table class="data-table"><thead><tr><th>变体</th><th>标题</th><th>浏览</th><th>点赞</th><th>评论</th><th>分享</th><th>互动分</th><th>互动率</th></tr></thead><tbody>';
+      for (const v of data.ranked) {
+        const isLeader = data.leader && data.leader.id === v.id;
+        html += `<tr style="${isLeader?'background:rgba(0,200,100,0.1)':''}">
+          <td>${esc(v.variant_key)} ${isLeader?'🏆':''}</td><td>${esc(v.title)}</td>
+          <td>${v.views}</td><td>${v.likes}</td><td>${v.comments}</td><td>${v.shares}</td>
+          <td><b>${v.engagement_score}</b></td><td>${v.engagement_rate}%</td></tr>`;
+      }
+      html += '</tbody></table>';
+      detail.innerHTML = html;
+    }
+    // 绑定变体添加
+    const addBtn = $('abv-add');
+    if (addBtn) {
+      // 填充账号下拉
+      const accSel = $('abv-account');
+      try {
+        const accounts = await API.get('/api/accounts');
+        accSel.innerHTML = '<option value="0">选择账号</option>';
+        for (const a of accounts) accSel.innerHTML += `<option value="${a.id}">${esc(a.name)}(${esc(a.platform)})</option>`;
+      } catch(e){}
+      addBtn.onclick = async () => {
+        await API.post(`/api/ab-tests/${testId}/variants`, {
+          variant_key: $('abv-key').value.trim(),
+          title: $('abv-title').value.trim(),
+          text: $('abv-text').value,
+          account_id: parseInt($('abv-account').value) || 0,
+        });
+        toast('变体已添加', 'ok');
+        viewAbTest(testId);
+      };
+    }
+  } catch (e) {}
+}
+
+async function loadSentimentSummary() {
+  try {
+    const data = await API.get('/api/sentiment/summary');
+    const badge = $('sa-summary-badge');
+    const summary = $('sa-summary');
+    let negCount = 0;
+    for (const item of (data.by_label || [])) {
+      if (item.sentiment === 'negative') negCount = item.cnt;
+    }
+    badge.textContent = negCount > 0 ? `${negCount} 条负面` : '';
+    badge.style.color = negCount > 0 ? 'var(--bad)' : '';
+    let html = `总消息: ${data.total} | `;
+    for (const item of (data.by_label || [])) {
+      const label = {negative:'负面', positive:'正面', neutral:'中性', unknown:'未分析'}[item.sentiment] || item.sentiment;
+      html += `${label}: ${item.cnt} (均分${(item.avg_score||0).toFixed(2)}) `;
+    }
+    summary.innerHTML = html;
+  } catch (e) {}
+}
+
+async function loadSentimentMessages() {
+  try {
+    const sentiment = $('sa-sentiment').value;
+    const params = new URLSearchParams();
+    if (sentiment) params.set('sentiment', sentiment);
+    const msgs = await API.get(`/api/interactions/by-sentiment?${params}`);
+    const tb = $('sa-table').querySelector('tbody');
+    tb.innerHTML = msgs.length ? '' : '<tr><td colspan="6" class="hint">暂无数据</td></tr>';
+    const sentimentColors = {negative:'var(--bad)', positive:'var(--ok)', neutral:'var(--dim)', unknown:'var(--dim)'};
+    const sentimentLabels = {negative:'负面', positive:'正面', neutral:'中性', unknown:'未分析'};
+    for (const m of msgs) {
+      const tr = document.createElement('tr');
+      const t = m.created_at || '';
+      const color = sentimentColors[m.sentiment] || '';
+      tr.innerHTML = `<td>${t}</td><td>${esc(m.account_name||'')}</td>
+        <td title="${esc(m.content||'')}">${esc((m.content||'').slice(0,50))}</td>
+        <td style="color:${color}">${sentimentLabels[m.sentiment]||m.sentiment}</td>
+        <td>${(m.sentiment_score||0).toFixed(2)}</td>
+        <td><button class="btn small" data-analyze="${m.id}">分析</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-analyze]').forEach(b => b.onclick = async () => {
+      const r = await API.post(`/api/interactions/${b.dataset.analyze}/analyze`);
+      toast(`情感分: ${r.score} (${r.label})`, r.label === 'negative' ? 'error' : 'ok');
+      loadSentimentMessages();
+      loadSentimentSummary();
+    });
+  } catch (e) {}
+}
+
+async function loadRelayFlows() {
+  try {
+    const flows = await API.get('/api/relay-flows');
+    const tb = $('rf-table').querySelector('tbody');
+    tb.innerHTML = flows.length ? '' : '<tr><td colspan="5" class="hint">暂无流水线</td></tr>';
+    for (const f of flows) {
+      const tr = document.createElement('tr');
+      let devices = [];
+      try { devices = JSON.parse(f.device_order || '[]'); } catch(e){}
+      const statusLabels = {idle:'空闲', running:'运行中', done:'完成'};
+      tr.innerHTML = `<td>${esc(f.name)}</td><td>${esc(f.description||'')}</td>
+        <td>${devices.length}</td><td>${statusLabels[f.status]||f.status}</td>
+        <td><button class="btn small primary" data-run="${f.id}">运行</button>
+        <button class="btn small danger" data-del="${f.id}">删</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('[data-run]').forEach(b => b.onclick = async () => {
+      toast('正在启动流水线…', 'info');
+      const r = await API.post(`/api/relay-flows/${b.dataset.run}/run`);
+      toast(`流水线已启动，设备: ${r.devices.join(', ')}`, 'ok');
+      loadRelayFlows();
+    });
+    tb.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+      await API.del(`/api/relay-flows/${b.dataset.del}`);
+      loadRelayFlows();
+    });
+  } catch (e) {}
+}
+
+function bindPhase4() {
+  // 竞品采集
+  $('cs-add').onclick = async () => {
+    const name = $('cs-name').value.trim();
+    const url = $('cs-url').value.trim();
+    if (!name || !url) return toast('名称和URL不能为空', 'error');
+    await API.post('/api/competitor-sources', {
+      name, url, platform: $('cs-platform').value.trim(),
+      source_type: $('cs-type').value,
+    });
+    toast('采集源已添加', 'ok');
+    $('cs-name').value = ''; $('cs-url').value = ''; $('cs-platform').value = '';
+    loadCompetitorSources();
+  };
+  $('cs-collect-all').onclick = async () => {
+    toast('正在执行全量采集…', 'info');
+    const r = await API.post('/api/competitor-collect/run');
+    toast(`采集完成，新增 ${r.new_items} 条`, 'ok');
+    loadCompetitorSources();
+    loadCompetitorContents();
+  };
+  $('cc-refresh').onclick = loadCompetitorContents;
+  $('cc-source').onchange = loadCompetitorContents;
+  $('cc-status').onchange = loadCompetitorContents;
+
+  // A/B 测试
+  $('abt-add').onclick = async () => {
+    const name = $('abt-name').value.trim();
+    if (!name) return toast('请输入测试名称', 'error');
+    await API.post('/api/ab-tests', { name });
+    toast('测试已创建', 'ok');
+    $('abt-name').value = '';
+    loadAbTests();
+  };
+
+  // 情感分析
+  $('sa-analyze').onclick = async () => {
+    toast('正在批量分析…', 'info');
+    const r = await API.post('/api/interactions/analyze-sentiment', { limit: 200 });
+    toast(`分析完成: 负面${r.negative} 正面${r.positive} 中性${r.neutral}`, 'ok');
+    loadSentimentSummary();
+    loadSentimentMessages();
+  };
+  $('sa-refresh').onclick = () => { loadSentimentSummary(); loadSentimentMessages(); };
+  $('sa-sentiment').onchange = loadSentimentMessages;
+
+  // 多机协作
+  $('rf-add').onclick = async () => {
+    const name = $('rf-name').value.trim();
+    if (!name) return toast('请输入流水线名称', 'error');
+    // 默认使用当前选中的设备作为设备顺序
+    const deviceOrder = Array.from(document.querySelectorAll('.device-cb:checked')).map(cb => cb.value);
+    await API.post('/api/relay-flows', {
+      name, description: $('rf-desc').value.trim(),
+      steps: [], device_order: deviceOrder,
+    });
+    toast('流水线已创建', 'ok');
+    $('rf-name').value = ''; $('rf-desc').value = '';
+    loadRelayFlows();
   };
 }

@@ -13,11 +13,12 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import (adb, auth as _auth, db, devicepolicy, netlimit as _netlimit_mod, plugins,
+from . import (adb, auth as _auth, db, devicepolicy, distribution,
+               netlimit as _netlimit_mod, plugins,
                reports, scenario, scheduler, vision)
-from .config import (CAPTURES_DIR, DEVICE_REFRESH_INTERVAL, HOST, MAX_FPS,
-                     MAX_SIZE, PORT, SNAPSHOT_INTERVAL, STATIC_DIR,
-                     UPLOADS_DIR, VIDEO_BITRATE)
+from .config import (CAPTURES_DIR, DATA_DIR, DEVICE_REFRESH_INTERVAL, HOST,
+                     MAX_FPS, MAX_SIZE, PORT, PUBLISH_TEMPLATES_DIR,
+                     SNAPSHOT_INTERVAL, STATIC_DIR, UPLOADS_DIR, VIDEO_BITRATE)
 from .events import bus
 from .scrcpy_client import ScrcpyClient, ScrcpyClientError, ensure_jar_pushed, hub
 from .scrcpy_protocol import encode_set_clipboard, encode_set_display_power
@@ -143,6 +144,8 @@ async def lifespan(app: FastAPI):
         _background.append(asyncio.create_task(_discovery_loop()))
         _background.append(asyncio.create_task(scheduler.scheduler_loop()))
         _background.append(asyncio.create_task(_health_loop()))
+        from .collector import collection_loop
+        _background.append(asyncio.create_task(collection_loop()))
     if not db.list_users():
         ph, salt = _auth.hash_password("admin")
         db.create_user("admin", ph, salt, "admin")
@@ -159,7 +162,7 @@ async def lifespan(app: FastAPI):
     bus.info("lifespan 关闭完成")
 
 
-__version__ = "0.9.12"
+__version__ = "0.10.0"
 app = FastAPI(title="narciFarm", version=__version__, lifespan=lifespan)
 
 
@@ -1913,8 +1916,70 @@ async def api_create_distribution_task(body: dict, _=Depends(_auth.require_user)
 
 @app.delete("/api/distribution-tasks/{task_id}")
 async def api_delete_distribution_task(task_id: int, _=Depends(_auth.require_user)):
-    with _lock:
-        db.execute("DELETE FROM distribution_tasks WHERE id=?", (task_id,))
+    db.execute("DELETE FROM distribution_tasks WHERE id=?", (task_id,))
+    return {"ok": True}
+
+
+@app.put("/api/accounts/{account_id}")
+async def api_update_account(account_id: int, body: dict, _=Depends(_auth.require_admin)):
+    fields = {k: str(v).strip() for k, v in body.items()
+              if k in ("platform", "name", "username", "api_token", "api_base", "avatar_url", "status")
+              and str(v).strip()}
+    if not fields:
+        raise HTTPException(400, "没有可更新的字段")
+    db.update_account(account_id, **fields)
+    return {"ok": True}
+
+
+@app.put("/api/contents/{content_id}")
+async def api_update_content(content_id: int, body: dict, _=Depends(_auth.require_user)):
+    fields = {}
+    for k in ("title", "type", "text", "media_path", "status"):
+        if k in body:
+            fields[k] = str(body[k]).strip() if k != "text" else str(body[k])
+    if not fields:
+        raise HTTPException(400, "没有可更新的字段")
+    db.update_content(content_id, **fields)
+    return {"ok": True}
+
+
+@app.post("/api/distribution-tasks/batch")
+async def api_batch_distribution(body: dict, _=Depends(_auth.require_user)):
+    """批量分发：一条内容 → 多个账号，支持错峰间隔。"""
+    content_id = int(body.get("content_id", 0))
+    account_ids = [int(x) for x in body.get("account_ids", []) if x]
+    scheduled_at = float(body.get("scheduled_at", time.time()))
+    interval_minutes = float(body.get("interval_minutes", 0))
+    max_retries = int(body.get("max_retries", 3))
+    if not content_id or not account_ids:
+        raise HTTPException(400, "内容和账号列表不能为空")
+    tasks = db.create_distribution_tasks_batch(
+        content_id, account_ids, scheduled_at, interval_minutes, max_retries)
+    # 更新内容状态为待发
+    db.update_content(content_id, status="pending")
+    return {"ok": True, "count": len(tasks), "tasks": tasks}
+
+
+@app.post("/api/distribution-tasks/publish-now")
+async def api_publish_now(body: dict, _=Depends(_auth.require_user)):
+    """立即发布（不走调度器）。"""
+    content_id = int(body.get("content_id", 0))
+    account_ids = [int(x) for x in body.get("account_ids", []) if x]
+    if not content_id or not account_ids:
+        raise HTTPException(400, "内容和账号列表不能为空")
+    results = await distribution.publish_now(content_id, account_ids)
+    return {"ok": True, "results": results}
+
+
+@app.post("/api/distribution-tasks/{task_id}/cancel")
+async def api_cancel_task(task_id: int, _=Depends(_auth.require_user)):
+    db.cancel_distribution_task(task_id)
+    return {"ok": True}
+
+
+@app.post("/api/distribution-tasks/{task_id}/retry")
+async def api_retry_task(task_id: int, _=Depends(_auth.require_user)):
+    db.retry_distribution_task(task_id)
     return {"ok": True}
 
 
@@ -1978,6 +2043,684 @@ async def api_remove_reverse_forward(serial: str, body: dict, _=Depends(_auth.re
     if device_port:
         await adb.remove_reverse_forward(serial, device_port)
     return {"ok": True}
+
+
+# ---------- 阶段二: 数据看板 / 分发分析 / 互动管理 / 模板 ----------
+
+@app.get("/api/metrics/range")
+async def api_metrics_range(account_id: int, start: float, end: float,
+                            granularity: str = "day",
+                            _=Depends(_auth.require_user)):
+    """按时间范围查询指标趋势。"""
+    return db.metrics_range(account_id, start, end, granularity)
+
+
+@app.get("/api/distribution/analytics")
+async def api_distribution_analytics(days: int = 30,
+                                     _=Depends(_auth.require_user)):
+    """分发统计：成功率、平台维度、时段分析。"""
+    return db.distribution_analytics(days)
+
+
+# --- 互动消息 ---
+
+@app.get("/api/interactions")
+async def api_list_interactions(account_id: int = 0, status: str = "",
+                                kind: str = "", limit: int = 100,
+                                _=Depends(_auth.require_user)):
+    return db.list_interactions(account_id, status, kind, limit)
+
+
+@app.get("/api/interactions/unread-count")
+async def api_unread_count(account_id: int = 0,
+                           _=Depends(_auth.require_user)):
+    return {"count": db.count_unread_interactions(account_id)}
+
+
+@app.post("/api/interactions")
+async def api_create_interaction(body: dict, _=Depends(_auth.require_user)):
+    account_id = int(body.get("account_id", 0))
+    if not account_id:
+        raise HTTPException(400, "账号不能为空")
+    return db.create_interaction(
+        account_id, str(body.get("platform", "")),
+        str(body.get("kind", "comment")), str(body.get("content", "")),
+        str(body.get("author_name", "")), str(body.get("author_id", "")),
+        str(body.get("post_title", "")), str(body.get("post_id", "")))
+
+
+@app.post("/api/interactions/{msg_id}/auto-reply")
+async def api_auto_reply(msg_id: int, _=Depends(_auth.require_user)):
+    """对指定消息尝试自动回复（匹配规则引擎）。"""
+    msg = db.query_one("SELECT * FROM interaction_messages WHERE id=?", (msg_id,))
+    if not msg or msg["replied"]:
+        return {"ok": False, "error": "消息不存在或已回复"}
+    rules = db.get_reply_rules_for_account(msg["account_id"], msg["kind"])
+    import json as _json
+    matched = None
+    for rule in rules:
+        if rule["match_type"] == "keyword":
+            try:
+                kws = _json.loads(rule["keywords"]) if rule["keywords"] else []
+            except _json.JSONDecodeError:
+                kws = []
+            if any(kw in msg["content"] for kw in kws if kw):
+                matched = rule
+                break
+        elif rule["match_type"] == "all":
+            matched = rule
+            break
+    if matched:
+        db.mark_interaction_replied(msg_id, matched["reply_text"])
+        return {"ok": True, "matched_rule": matched["name"],
+                "reply_text": matched["reply_text"]}
+    return {"ok": False, "error": "无匹配规则"}
+
+
+@app.post("/api/interactions/{msg_id}/reply")
+async def api_reply_interaction(msg_id: int, body: dict,
+                                _=Depends(_auth.require_user)):
+    reply_text = str(body.get("reply_text", ""))
+    if not reply_text:
+        raise HTTPException(400, "回复内容不能为空")
+    db.mark_interaction_replied(msg_id, reply_text)
+    return {"ok": True}
+
+
+@app.post("/api/interactions/{msg_id}/read")
+async def api_read_interaction(msg_id: int, _=Depends(_auth.require_user)):
+    db.mark_interaction_read(msg_id)
+    return {"ok": True}
+
+
+# --- 自动回复规则 ---
+
+@app.get("/api/reply-rules")
+async def api_list_reply_rules(account_id: int = 0,
+                               _=Depends(_auth.require_user)):
+    return db.list_reply_rules(account_id)
+
+
+@app.post("/api/reply-rules")
+async def api_create_reply_rule(body: dict, _=Depends(_auth.require_user)):
+    name = str(body.get("name", "")).strip()
+    reply_text = str(body.get("reply_text", "")).strip()
+    if not name or not reply_text:
+        raise HTTPException(400, "名称和回复内容不能为空")
+    return db.create_reply_rule(
+        name, reply_text,
+        int(body.get("account_id", 0)),
+        str(body.get("platform", "")),
+        str(body.get("kind", "comment")),
+        str(body.get("match_type", "keyword")),
+        str(body.get("keywords", "[]")),
+        int(body.get("priority", 0)))
+
+
+@app.put("/api/reply-rules/{rule_id}")
+async def api_update_reply_rule(rule_id: int, body: dict,
+                                _=Depends(_auth.require_user)):
+    fields = {}
+    for k in ("name", "account_id", "platform", "kind", "match_type",
+              "keywords", "reply_text", "priority", "enabled"):
+        if k in body:
+            fields[k] = body[k]
+    if not fields:
+        raise HTTPException(400, "没有可更新的字段")
+    db.update_reply_rule(rule_id, **fields)
+    return {"ok": True}
+
+
+@app.delete("/api/reply-rules/{rule_id}")
+async def api_delete_reply_rule(rule_id: int, _=Depends(_auth.require_user)):
+    db.delete_reply_rule(rule_id)
+    return {"ok": True}
+
+
+# --- 内容模板 ---
+
+@app.get("/api/content-templates")
+async def api_list_templates(platform: str = "",
+                             _=Depends(_auth.require_user)):
+    return db.list_content_templates(platform)
+
+
+@app.post("/api/content-templates")
+async def api_create_template(body: dict, _=Depends(_auth.require_user)):
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "模板名称不能为空")
+    return db.create_content_template(
+        name, str(body.get("platform", "")),
+        str(body.get("title_template", "")),
+        str(body.get("text_template", "")),
+        str(body.get("variables", "{}")))
+
+
+@app.get("/api/content-templates/{template_id}")
+async def api_get_template(template_id: int,
+                           _=Depends(_auth.require_user)):
+    t = db.get_content_template(template_id)
+    if not t:
+        raise HTTPException(404, "模板不存在")
+    return t
+
+
+@app.put("/api/content-templates/{template_id}")
+async def api_update_template(template_id: int, body: dict,
+                              _=Depends(_auth.require_user)):
+    fields = {}
+    for k in ("name", "platform", "title_template", "text_template", "variables"):
+        if k in body:
+            fields[k] = body[k]
+    if not fields:
+        raise HTTPException(400, "没有可更新的字段")
+    db.update_content_template(template_id, **fields)
+    return {"ok": True}
+
+
+@app.delete("/api/content-templates/{template_id}")
+async def api_delete_template(template_id: int,
+                              _=Depends(_auth.require_user)):
+    db.delete_content_template(template_id)
+    return {"ok": True}
+
+
+@app.post("/api/content-templates/{template_id}/render")
+async def api_render_template(template_id: int, body: dict,
+                              _=Depends(_auth.require_user)):
+    """用给定变量渲染模板，返回标题和正文。"""
+    t = db.get_content_template(template_id)
+    if not t:
+        raise HTTPException(404, "模板不存在")
+    variables = body.get("variables", {})
+    title = db.render_template(t.get("title_template", ""), variables)
+    text = db.render_template(t.get("text_template", ""), variables)
+    return {"ok": True, "title": title, "text": text}
+
+
+# ---------- 阶段三: 发布场景模板 / 风控 / 分发-场景闭环 ----------
+
+def _publish_templates_dir() -> Path:
+    """发布模板目录：优先用户可写目录（可自定义/扩充），回退内置资源目录。"""
+    user_dir = DATA_DIR / "publish_templates"
+    if user_dir.is_dir():
+        return user_dir
+    return PUBLISH_TEMPLATES_DIR
+
+
+@app.get("/api/publish-templates")
+async def api_list_publish_templates(platform: str = "",
+                                     _=Depends(_auth.require_user)):
+    """列出预置发布场景模板。"""
+    import json as _json
+    tpl_dir = _publish_templates_dir()
+    if not tpl_dir.is_dir():
+        return []
+    results = []
+    for f in sorted(tpl_dir.glob("*.json")):
+        try:
+            data = _json.loads(f.read_text(encoding="utf-8"))
+            if platform and data.get("platform", "") != platform:
+                continue
+            data["file"] = f.name
+            results.append(data)
+        except Exception:
+            continue
+    return results
+
+
+@app.get("/api/publish-templates/{filename}")
+async def api_get_publish_template(filename: str,
+                                   _=Depends(_auth.require_user)):
+    """获取单个发布场景模板。"""
+    import json as _json
+    path = _publish_templates_dir() / filename
+    if not path.is_file() or not path.name.endswith(".json"):
+        raise HTTPException(404, "模板不存在")
+    return _json.loads(path.read_text(encoding="utf-8"))
+
+
+@app.post("/api/publish-templates/create-scenario")
+async def api_create_scenario_from_template(body: dict,
+                                            _=Depends(_auth.require_user)):
+    """从发布模板创建场景，可直接用于调度。"""
+    import json as _json
+    filename = str(body.get("filename", ""))
+    name = str(body.get("name", "")).strip()
+    if not filename:
+        raise HTTPException(400, "模板文件名不能为空")
+    path = _publish_templates_dir() / filename
+    if not path.is_file():
+        raise HTTPException(404, "模板不存在")
+    tpl = _json.loads(path.read_text(encoding="utf-8"))
+    scenario_name = name or f"[自动] {tpl.get('name', filename)}"
+    steps_json = _json.dumps(tpl.get("steps", []))
+    sc = db.create_scenario(scenario_name, steps_json)
+    return {"ok": True, "scenario_id": sc["id"], "name": scenario_name,
+            "steps_count": len(tpl.get("steps", []))}
+
+
+# --- 风控状态 ---
+
+@app.get("/api/risk/status")
+async def api_risk_status(_=Depends(_auth.require_user)):
+    """所有设备的风控状态。"""
+    from . import risk_control
+    return risk_control.get_all_risk_states()
+
+
+@app.get("/api/risk/status/{serial}")
+async def api_risk_status_device(serial: str,
+                                 _=Depends(_auth.require_user)):
+    """单设备风控状态。"""
+    from . import risk_control
+    return risk_control.get_risk_state(serial)
+
+
+@app.post("/api/risk/clear/{serial}")
+async def api_risk_clear(serial: str, _=Depends(_auth.require_user)):
+    """手动解除设备风控状态。"""
+    from . import risk_control
+    risk_control.clear_risk(serial)
+    return {"ok": True}
+
+
+# --- 分发-场景闭环 ---
+
+@app.post("/api/distribution-tasks/{task_id}/link-scenario")
+async def api_link_scenario(task_id: int, body: dict,
+                            _=Depends(_auth.require_user)):
+    """为分发任务关联场景（执行发布流程）。"""
+    scenario_id = int(body.get("scenario_id", 0))
+    if not scenario_id:
+        raise HTTPException(400, "场景 ID 不能为空")
+    sc = db.get_scenario(scenario_id)
+    if not sc:
+        raise HTTPException(404, "场景不存在")
+    db.execute("UPDATE distribution_tasks SET scenario_id=? WHERE id=?",
+               (scenario_id, task_id))
+    return {"ok": True}
+
+
+# ---------- 阶段四: 竞品采集 / A-B测试 / 情感分析 / 多机协作 ----------
+
+# --- 竞品采集源 ---
+
+@app.get("/api/competitor-sources")
+async def api_list_competitor_sources(_=Depends(_auth.require_user)):
+    return db.list_competitor_sources()
+
+
+@app.post("/api/competitor-sources")
+async def api_create_competitor_source(body: dict, _=Depends(_auth.require_user)):
+    name = str(body.get("name", "")).strip()
+    url = str(body.get("url", "")).strip()
+    if not name or not url:
+        raise HTTPException(400, "名称和 URL 不能为空")
+    return db.create_competitor_source(
+        name, url, str(body.get("platform", "")),
+        str(body.get("source_type", "rss")),
+        str(body.get("api_key", "")),
+        str(body.get("config", "{}")),
+        float(body.get("collect_interval", 3600)),
+    )
+
+
+@app.put("/api/competitor-sources/{source_id}")
+async def api_update_competitor_source(source_id: int, body: dict,
+                                       _=Depends(_auth.require_user)):
+    fields = {}
+    for k in ("name", "url", "platform", "source_type", "api_key",
+              "config", "collect_interval", "enabled"):
+        if k in body:
+            fields[k] = body[k]
+    if not fields:
+        raise HTTPException(400, "没有可更新的字段")
+    db.update_competitor_source(source_id, **fields)
+    return {"ok": True}
+
+
+@app.delete("/api/competitor-sources/{source_id}")
+async def api_delete_competitor_source(source_id: int,
+                                       _=Depends(_auth.require_user)):
+    db.delete_competitor_source(source_id)
+    return {"ok": True}
+
+
+@app.post("/api/competitor-sources/{source_id}/collect")
+async def api_collect_source(source_id: int, _=Depends(_auth.require_user)):
+    """手动触发单个采集源立即采集。"""
+    from . import collector
+    source = db.get_competitor_source(source_id)
+    if not source:
+        raise HTTPException(404, "采集源不存在")
+    items = await collector.collect_source(source)
+    return {"ok": True, "new_items": len(items)}
+
+
+@app.post("/api/competitor-collect/run")
+async def api_run_collection_cycle(_=Depends(_auth.require_user)):
+    """手动触发一轮完整采集。"""
+    from . import collector
+    total = await collector.run_collection_cycle()
+    return {"ok": True, "new_items": total}
+
+
+# --- 竞品内容 ---
+
+@app.get("/api/competitor-contents")
+async def api_list_competitor_contents(source_id: int = 0, platform: str = "",
+                                       status: str = "", limit: int = 100,
+                                       _=Depends(_auth.require_user)):
+    return db.list_competitor_contents(source_id, platform, status, limit)
+
+
+@app.put("/api/competitor-contents/{content_id}")
+async def api_update_competitor_content(content_id: int, body: dict,
+                                        _=Depends(_auth.require_user)):
+    fields = {}
+    for k in ("title", "content", "status", "tags", "metrics"):
+        if k in body:
+            fields[k] = body[k]
+    db.update_competitor_content(content_id, **fields)
+    return {"ok": True}
+
+
+@app.delete("/api/competitor-contents/{content_id}")
+async def api_delete_competitor_content(content_id: int,
+                                        _=Depends(_auth.require_user)):
+    db.delete_competitor_content(content_id)
+    return {"ok": True}
+
+
+@app.post("/api/competitor-contents/{content_id}/promote")
+async def api_promote_competitor_content(content_id: int,
+                                         _=Depends(_auth.require_user)):
+    """将竞品内容转为自有内容。"""
+    result = db.promote_competitor_content(content_id)
+    if not result:
+        raise HTTPException(404, "内容不存在")
+    return {"ok": True, "content": result}
+
+
+# --- A/B 测试 ---
+
+@app.get("/api/ab-tests")
+async def api_list_ab_tests(_=Depends(_auth.require_user)):
+    return db.list_ab_tests()
+
+
+@app.post("/api/ab-tests")
+async def api_create_ab_test(body: dict, _=Depends(_auth.require_user)):
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "测试名称不能为空")
+    return db.create_ab_test(name, int(body.get("content_id", 0)))
+
+
+@app.get("/api/ab-tests/{test_id}")
+async def api_get_ab_test(test_id: int, _=Depends(_auth.require_user)):
+    t = db.get_ab_test(test_id)
+    if not t:
+        raise HTTPException(404, "测试不存在")
+    return t
+
+
+@app.put("/api/ab-tests/{test_id}")
+async def api_update_ab_test(test_id: int, body: dict,
+                             _=Depends(_auth.require_user)):
+    fields = {}
+    for k in ("name", "status", "winner_variant_id"):
+        if k in body:
+            fields[k] = body[k]
+    db.update_ab_test(test_id, **fields)
+    return {"ok": True}
+
+
+@app.delete("/api/ab-tests/{test_id}")
+async def api_delete_ab_test(test_id: int, _=Depends(_auth.require_user)):
+    db.delete_ab_test(test_id)
+    return {"ok": True}
+
+
+@app.post("/api/ab-tests/{test_id}/variants")
+async def api_create_ab_variant(test_id: int, body: dict,
+                                _=Depends(_auth.require_user)):
+    test = db.get_ab_test(test_id)
+    if not test:
+        raise HTTPException(404, "测试不存在")
+    variant_key = str(body.get("variant_key", "")).strip()
+    title = str(body.get("title", "")).strip()
+    if not variant_key or not title:
+        raise HTTPException(400, "variant_key 和 title 不能为空")
+    return db.create_ab_variant(
+        test_id, variant_key, title,
+        str(body.get("text", "")), str(body.get("media_path", "")),
+        int(body.get("account_id", 0)),
+    )
+
+
+@app.put("/api/ab-variants/{variant_id}")
+async def api_update_ab_variant(variant_id: int, body: dict,
+                                _=Depends(_auth.require_user)):
+    fields = {}
+    for k in ("variant_key", "title", "text", "media_path",
+              "account_id", "task_id", "status", "views", "likes",
+              "comments", "shares", "followers_gained"):
+        if k in body:
+            fields[k] = body[k]
+    db.update_ab_variant(variant_id, **fields)
+    return {"ok": True}
+
+
+@app.post("/api/ab-tests/{test_id}/launch")
+async def api_launch_ab_test(test_id: int, body: dict,
+                             _=Depends(_auth.require_user)):
+    """启动 A/B 测试：为每个变体创建分发任务。"""
+    import json as _json
+    test = db.get_ab_test(test_id)
+    if not test:
+        raise HTTPException(404, "测试不存在")
+    variants = test.get("variants", [])
+    if not variants:
+        raise HTTPException(400, "测试没有变体")
+
+    scheduled_at = float(body.get("scheduled_at", time.time()))
+    results = []
+    for v in variants:
+        # 为每个变体创建独立的内容和分发任务
+        content = db.create_content(
+            title=f"[A/B] {v['title']}",
+            type="text",
+            text=v.get("text", ""),
+            media_path=v.get("media_path", ""),
+        )
+        task = db.create_distribution_task(
+            content_id=content["id"],
+            account_id=v["account_id"],
+            scheduled_at=scheduled_at,
+        )
+        if task:
+            db.update_ab_variant(v["id"], task_id=task["id"], status="pending")
+            results.append({"variant_id": v["id"], "task_id": task["id"],
+                            "content_id": content["id"]})
+
+    db.update_ab_test(test_id, status="running", started_at=time.time())
+    return {"ok": True, "launched": len(results), "results": results}
+
+
+@app.get("/api/ab-tests/{test_id}/analytics")
+async def api_ab_test_analytics(test_id: int, _=Depends(_auth.require_user)):
+    """获取 A/B 测试效果分析。"""
+    return db.ab_test_analytics(test_id)
+
+
+@app.post("/api/ab-tests/{test_id}/conclude")
+async def api_conclude_ab_test(test_id: int, body: dict,
+                               _=Depends(_auth.require_user)):
+    """结束 A/B 测试并标记获胜变体。"""
+    winner_id = int(body.get("winner_variant_id", 0))
+    analytics = db.ab_test_analytics(test_id)
+    if not analytics:
+        raise HTTPException(404, "测试不存在")
+
+    # 如果未指定获胜者，自动选择互动分数最高的
+    if not winner_id and analytics.get("ranked"):
+        winner_id = analytics["ranked"][0]["id"]
+
+    db.update_ab_test(test_id, status="concluded",
+                      winner_variant_id=winner_id,
+                      ended_at=time.time())
+    winner = next((v for v in analytics["variants"] if v["id"] == winner_id), None)
+    return {"ok": True, "winner": winner}
+
+
+# --- 情感分析 ---
+
+@app.get("/api/sentiment/summary")
+async def api_sentiment_summary(account_id: int = 0,
+                                _=Depends(_auth.require_user)):
+    """获取情感分析汇总。"""
+    return db.sentiment_summary(account_id)
+
+
+@app.get("/api/interactions/by-sentiment")
+async def api_interactions_by_sentiment(account_id: int = 0,
+                                        sentiment: str = "",
+                                        limit: int = 100,
+                                        _=Depends(_auth.require_user)):
+    """按情感标签筛选互动消息。"""
+    return db.list_interactions_with_sentiment(account_id, sentiment, limit)
+
+
+@app.post("/api/interactions/analyze-sentiment")
+async def api_analyze_sentiment(body: dict, _=Depends(_auth.require_user)):
+    """批量分析互动消息的情感倾向。"""
+    from . import sentiment as _sentiment
+    result = _sentiment.batch_analyze_interactions(
+        int(body.get("account_id", 0)),
+        int(body.get("limit", 100)),
+    )
+    return {"ok": True, **result}
+
+
+@app.post("/api/interactions/{msg_id}/analyze")
+async def api_analyze_single_sentiment(msg_id: int,
+                                       _=Depends(_auth.require_user)):
+    """分析单条互动消息的情感。"""
+    from . import sentiment as _sentiment
+    msg = db.query_one("SELECT * FROM interaction_messages WHERE id=?", (msg_id,))
+    if not msg:
+        raise HTTPException(404, "消息不存在")
+    result = _sentiment.process_interaction(msg)
+    return {"ok": True, **result}
+
+
+# --- 多机协作 ---
+
+@app.get("/api/relay-flows")
+async def api_list_relay_flows(_=Depends(_auth.require_user)):
+    return db.list_relay_flows()
+
+
+@app.post("/api/relay-flows")
+async def api_create_relay_flow(body: dict, _=Depends(_auth.require_user)):
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "流水线名称不能为空")
+    import json as _json
+    steps = body.get("steps", [])
+    device_order = body.get("device_order", [])
+    return db.create_relay_flow(
+        name, _json.dumps(steps, ensure_ascii=False),
+        _json.dumps(device_order, ensure_ascii=False),
+        str(body.get("description", "")),
+    )
+
+
+@app.get("/api/relay-flows/{flow_id}")
+async def api_get_relay_flow(flow_id: int, _=Depends(_auth.require_user)):
+    flow = db.get_relay_flow(flow_id)
+    if not flow:
+        raise HTTPException(404, "流水线不存在")
+    return flow
+
+
+@app.put("/api/relay-flows/{flow_id}")
+async def api_update_relay_flow(flow_id: int, body: dict,
+                                _=Depends(_auth.require_user)):
+    import json as _json
+    fields = {}
+    for k in ("name", "description"):
+        if k in body:
+            fields[k] = body[k]
+    if "steps" in body:
+        fields["steps"] = _json.dumps(body["steps"], ensure_ascii=False)
+    if "device_order" in body:
+        fields["device_order"] = _json.dumps(body["device_order"], ensure_ascii=False)
+    db.update_relay_flow(flow_id, **fields)
+    return {"ok": True}
+
+
+@app.delete("/api/relay-flows/{flow_id}")
+async def api_delete_relay_flow(flow_id: int, _=Depends(_auth.require_user)):
+    db.delete_relay_flow(flow_id)
+    return {"ok": True}
+
+
+@app.post("/api/relay-flows/{flow_id}/run")
+async def api_run_relay_flow(flow_id: int, body: dict,
+                             _=Depends(_auth.require_user)):
+    """启动多机协作流水线。"""
+    import json as _json
+    flow = db.get_relay_flow(flow_id)
+    if not flow:
+        raise HTTPException(404, "流水线不存在")
+
+    try:
+        steps = _json.loads(flow["steps"]) if flow["steps"] else []
+        device_order = _json.loads(flow["device_order"]) if flow["device_order"] else []
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "流水线配置格式错误")
+    if not steps:
+        raise HTTPException(400, "流水线步骤为空，请先配置步骤")
+    if not device_order:
+        raise HTTPException(400, "设备顺序列表为空")
+
+    # 检查设备在线
+    online = {d["serial"] for d in await adb.list_devices() if d["state"] == "device"}
+    available = [s for s in device_order if s in online]
+    if not available:
+        raise HTTPException(400, "所有目标设备均不在线")
+
+    db.update_relay_flow(flow_id, status="running", current_device_idx=0)
+
+    # 构建接力场景：按设备顺序执行，每段用 relay 步骤切换设备
+    relay_steps = []
+    for i, serial in enumerate(available):
+        if i == 0:
+            # 第一台设备直接执行主步骤
+            relay_steps.extend(steps)
+        else:
+            # 后续设备通过 relay 步骤接管
+            prev_serial = available[i - 1]
+            relay_steps.append({
+                "type": "relay",
+                "target_serial": serial,
+                "steps": steps,
+                "wait_complete": True,
+                "on_fail": "abort",
+            })
+
+    run_id = await scenario.start_run(
+        relay_steps, 1, available[:1],  # 从第一台设备开始
+        body.get("vars") or {},
+        scenario_name=f"[接力] {flow['name']}",
+    )
+    db.update_relay_flow(flow_id, run_id=run_id)
+    bus.info(f"接力流水线[{flow['name']}] 启动 run={run_id[:8]} 设备={available}")
+    return {"ok": True, "run_id": run_id, "devices": available}
 
 
 @app.get("/metrics")

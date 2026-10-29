@@ -19,7 +19,8 @@ STEP_TYPES = {"tap", "swipe", "text", "key", "back", "home", "launch", "stop_app
               "tap_image", "wait_image", "assert_image", "find_image",
               "ocr_tap", "ocr_get", "ocr_find",
               "tap_el", "wait_el", "assert_el", "swipe_el", "assert_value",
-              "reboot", "locate", "airplane", "lock", "unlock"}
+              "reboot", "locate", "airplane", "lock", "unlock",
+              "verify_publish", "detect_risk", "relay", "relay_barrier"}
 
 _runs: dict[str, dict] = {}
 _lock = asyncio.Lock()
@@ -320,6 +321,14 @@ async def _execute_step(step: dict, serial: str, size: tuple[int, int],
         return {"matches": res, "count": len(res)}
     if stype in ("tap_el", "wait_el", "assert_el", "swipe_el"):
         return await _execute_element_step(step, serial)
+    if stype == "verify_publish":
+        return await _verify_publish(step, serial)
+    if stype == "detect_risk":
+        return await _detect_risk(step, serial)
+    if stype == "relay":
+        return await _execute_relay(step, serial, run_id)
+    if stype == "relay_barrier":
+        return await _execute_relay_barrier(step, serial, run_id)
     # 插件步骤：内置类型优先，未识别的交给注册表（插件不会覆盖内置行为）
     from .plugins import REGISTRY
     handler = REGISTRY.get(stype)
@@ -389,6 +398,203 @@ def substitute_vars(step: dict, variables: dict) -> dict:
                 v = v.replace("{{" + key + "}}", str(val))
         out[k] = v
     return out
+
+
+async def _verify_publish(step: dict, serial: str) -> dict:
+    """发布验证步骤：截图并与参考模板对比，确认发布成功。
+
+    参数:
+      template: 参考模板图片名（在 templates 目录中）
+      threshold: 匹配阈值（默认 0.7）
+      ocr_text: 可选，用 OCR 检测屏幕上是否出现指定文本
+      wait_ms: 截图前等待时间（默认 3000ms，等待页面刷新）
+    """
+    from . import vision
+    wait_ms = int(step.get("wait_ms", 3000))
+    if wait_ms > 0:
+        await asyncio.sleep(wait_ms / 1000.0)
+
+    results = {"screenshot": None, "template_match": None, "ocr_found": None}
+
+    # OCR 验证
+    ocr_text = str(step.get("ocr_text", ""))
+    if ocr_text:
+        ocr_results = await vision.ocr_find_on_device(serial, target=ocr_text)
+        results["ocr_found"] = len(ocr_results) > 0
+        if not results["ocr_found"] and step.get("strict_ocr"):
+            raise ScenarioError(f"发布验证失败: OCR 未找到 '{ocr_text}'")
+
+    # 模板匹配验证
+    template = str(step.get("template", ""))
+    if template:
+        path = vision.resolve_template(template)
+        threshold = float(step.get("threshold", 0.7))
+        res = await vision.match_on_device(serial, path, threshold)
+        results["template_match"] = res is not None
+        if res is None and step.get("strict_template"):
+            raise ScenarioError(f"发布验证失败: 模板不匹配 '{template}'")
+
+    # 截图存档
+    from .config import CAPTURES_DIR
+    data = await adb.screenshot_bytes(serial)
+    name = f"verify_{serial}_{int(time.time()*1000)}.png"
+    path = CAPTURES_DIR / name
+    path.write_bytes(data)
+    results["screenshot"] = str(path)
+
+    return results
+
+
+async def _detect_risk(step: dict, serial: str) -> dict:
+    """风控检测步骤：检查屏幕是否出现验证码、限流提示等风险信号。
+
+    参数:
+      ocr_keywords: 风险关键词列表（如 ["验证码", "请完成安全验证", "操作过于频繁"]）
+      risk_images: 风险信号模板图片列表（如 captcha 弹窗截图）
+      threshold: 图片匹配阈值（默认 0.8）
+      on_risk: 检测到风险时的动作 - "abort"(默认) / "continue" / "screenshot"
+    """
+    from . import vision
+    risk_detected = []
+
+    # OCR 关键词检测
+    keywords = step.get("ocr_keywords") or []
+    if keywords:
+        for kw in keywords:
+            ocr_results = await vision.ocr_find_on_device(serial, target=str(kw))
+            if ocr_results:
+                risk_detected.append({"type": "ocr", "keyword": kw,
+                                      "confidence": ocr_results[0].get("confidence", 0)})
+
+    # 模板图片检测
+    risk_images = step.get("risk_images") or []
+    threshold = float(step.get("threshold", 0.8))
+    for img_name in risk_images:
+        path = vision.resolve_template(str(img_name))
+        res = await vision.match_on_device(serial, path, threshold)
+        if res is not None:
+            risk_detected.append({"type": "image", "template": img_name,
+                                  "score": round(res[2], 3)})
+
+    on_risk = str(step.get("on_risk", "abort"))
+
+    if risk_detected:
+        # 截图存档
+        from .config import CAPTURES_DIR
+        data = await adb.screenshot_bytes(serial)
+        name = f"risk_{serial}_{int(time.time()*1000)}.png"
+        risk_path = CAPTURES_DIR / name
+        risk_path.write_bytes(data)
+
+        bus.warn(f"风控告警 [{serial}]: 检测到 {len(risk_detected)} 个风险信号")
+
+        if on_risk == "abort":
+            raise ScenarioError(f"检测到风控信号: {risk_detected}")
+        return {"risk": True, "details": risk_detected, "screenshot": str(risk_path)}
+
+    return {"risk": False, "details": []}
+
+
+async def _execute_relay(step: dict, serial: str, run_id: str) -> dict:
+    """多机协作接力步骤：将后续操作委托给另一台设备执行。
+
+    参数:
+      target_serial: 目标设备序列号（或变量 {{relay_target}}）
+      steps: 要在目标设备上执行的子步骤列表
+      wait_complete: 是否等待目标设备完成（默认 True）
+      on_fail: 目标设备失败时的行为 - "abort"(默认) / "continue" / "skip"
+    """
+    target_serial = str(step.get("target_serial", ""))
+    if not target_serial:
+        raise ScenarioError("relay 步骤缺少 target_serial")
+
+    sub_steps = step.get("steps", [])
+    if not sub_steps:
+        raise ScenarioError("relay 步骤缺少 steps 子步骤列表")
+
+    wait_complete = bool(step.get("wait_complete", True))
+    on_fail = str(step.get("on_fail", "abort"))
+
+    bus.info(f"接力 [{serial}] → [{target_serial}]: {len(sub_steps)} 个步骤")
+
+    # 检查目标设备是否在线
+    devices = await adb.list_devices()
+    online = {d["serial"] for d in devices if d["state"] == "device"}
+    if target_serial not in online:
+        msg = f"接力目标设备不在线: {target_serial}"
+        if on_fail == "abort":
+            raise ScenarioError(msg)
+        return {"relayed": False, "error": msg, "target": target_serial}
+
+    # 在目标设备上执行子步骤
+    target_size = await adb.get_screen_size(target_serial)
+    abort = asyncio.Event()
+    fake_state = {"status": "running", "done": 0, "current": 0, "results": []}
+
+    try:
+        await _run_step_list(sub_steps, target_serial, target_size,
+                             run_id, abort, fake_state, {})
+    except (ScenarioError, adb.AdbError) as e:
+        msg = f"接力设备[{target_serial}]执行失败: {e}"
+        if on_fail == "abort":
+            raise ScenarioError(msg)
+        return {"relayed": True, "error": msg, "target": target_serial,
+                "done_steps": fake_state["done"]}
+
+    return {
+        "relayed": True,
+        "target": target_serial,
+        "done_steps": fake_state["done"],
+        "results": fake_state.get("results", []),
+    }
+
+
+async def _execute_relay_barrier(step: dict, serial: str, run_id: str) -> dict:
+    """接力同步屏障：等待所有指定设备到达同一阶段后才继续。
+
+    参数:
+      barrier_id: 屏障标识（相同 barrier_id 的设备互相等待）
+      timeout_ms: 等待超时时间（默认 30000ms）
+    """
+    barrier_id = str(step.get("barrier_id", "default"))
+    timeout_ms = float(step.get("timeout_ms", 30000))
+
+    run = _runs.get(run_id)
+    if not run:
+        return {"barrier": barrier_id, "status": "no_run"}
+
+    # 在运行记录中标记此设备已到达屏障
+    device_key = f"barrier:{barrier_id}"
+    run.setdefault(device_key, {})
+    run[device_key][serial] = time.time()
+
+    # 检查是否所有参与设备都已到达
+    expected_serials = set(run["devices"].keys())
+    arrived = set(run[device_key].keys())
+    waiting_for = expected_serials - arrived
+
+    if not waiting_for:
+        # 所有设备到达，清除屏障
+        run.pop(device_key, None)
+        return {"barrier": barrier_id, "status": "passed",
+                "devices": list(arrived)}
+
+    # 等待其他设备
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        current_arrived = set(run.get(device_key, {}).keys())
+        if len(current_arrived) >= len(expected_serials):
+            run.pop(device_key, None)
+            return {"barrier": barrier_id, "status": "passed",
+                    "devices": list(current_arrived)}
+        await asyncio.sleep(0.5)
+
+    # 超时
+    arrived_final = set(run.get(device_key, {}).keys())
+    run.pop(device_key, None)
+    missing = expected_serials - arrived_final
+    raise ScenarioError(
+        f"接力屏障超时({timeout_ms}ms): 等待设备 {list(missing)}")
 
 
 async def _run_device(run_id: str, steps: list, repeat: int, serial: str,
@@ -566,9 +772,6 @@ async def _finalize_run(run_id: str, device_tasks: list, sampler_tasks: list) ->
     for task in sampler_tasks:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
-    run = _runs.get(run_id)
-    if not run:
-        return
     run = _runs.get(run_id)
     if not run:
         return

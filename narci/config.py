@@ -35,6 +35,8 @@ DB_PATH = DATA_DIR / "narci.db"
 
 STATIC_DIR = BASE_DIR / "static"
 ASSETS_DIR = BASE_DIR / "assets"
+# 内置发布场景模板（只读资源，随包分发；用户可在 DATA_DIR/publish_templates 覆盖/扩充）
+PUBLISH_TEMPLATES_DIR = ASSETS_DIR / "publish_templates"
 SERVER_JAR = Path(os.environ.get("NARCI_SERVER_JAR", ASSETS_DIR / "scrcpy-server.jar"))
 SERVER_VERSION = os.environ.get("NARCI_SERVER_VERSION", "5.0.1")
 # 分布式 Agent 共享密钥: 设置后, Agent 注册/命令必须携带正确密钥, 否则拒绝

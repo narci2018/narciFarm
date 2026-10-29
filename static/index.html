@@ -297,6 +297,10 @@
               <option value="airplane">airplane 飞行模式</option>
               <option value="lock">lock 锁屏</option>
               <option value="unlock">unlock 解锁</option>
+              <option value="verify_publish">verify_publish 发布验证(截图+OCR)</option>
+              <option value="detect_risk">detect_risk 风控检测</option>
+              <option value="relay">relay 多机接力(委托子步骤到目标设备)</option>
+              <option value="relay_barrier">relay_barrier 接力同步屏障</option>
               <option value="loop">loop 循环</option>
             </select>
             <button id="sc-add" class="btn small">添加步骤</button>
@@ -371,7 +375,7 @@
           <select id="ac-device-bind"></select>
           <button class="btn small" id="ac-bind">绑定到设备</button>
         </div>
-        <table class="data-table" id="ac-table"><thead><tr><th>ID</th><th>平台</th><th>名称</th><th>绑定设备</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+        <table class="data-table" id="ac-table"><thead><tr><th>ID</th><th>平台</th><th>名称</th><th>用户名</th><th>绑定设备</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
       </div>
       <div class="pane-card">
         <h3>内容库</h3>
@@ -382,17 +386,30 @@
           <label class="btn small filelabel">上传媒体<input type="file" id="ct-file" hidden></label>
           <button class="btn small primary" id="ct-add">添加内容</button>
         </div>
-        <table class="data-table" id="ct-table"><thead><tr><th>ID</th><th>标题</th><th>类型</th><th>操作</th></tr></thead><tbody></tbody></table>
+        <table class="data-table" id="ct-table"><thead><tr><th>ID</th><th>标题</th><th>类型</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
       </div>
       <div class="pane-card">
         <h3>分发任务</h3>
         <div class="form-row">
           <select id="dt-content"></select>
           <select id="dt-account"></select>
-          <input id="dt-time" placeholder="时间 YYYY-MM-DD HH:MM" style="width:170px">
+          <input id="dt-time" type="datetime-local" style="width:190px">
           <button class="btn small primary" id="dt-add">创建任务</button>
         </div>
-        <table class="data-table" id="dt-table"><thead><tr><th>ID</th><th>内容</th><th>账号</th><th>计划时间</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+        <div class="form-row" style="margin-top:6px">
+          <strong>批量分发：</strong>
+          <select id="dt-batch-content"></select>
+          <input id="dt-batch-interval" type="number" value="20" min="0" max="120" style="width:80px" title="账号间发布间隔(分钟)">
+          <span class="hint">分钟间隔</span>
+          <input id="dt-batch-time" type="datetime-local" style="width:190px">
+          <button class="btn small primary" id="dt-batch-go">批量分发</button>
+          <button class="btn small" id="dt-batch-now" title="选中账号后立即发布">立即发布</button>
+        </div>
+        <div class="form-row" style="margin-top:4px">
+          <label class="hint"><input type="checkbox" id="dt-batch-all" checked> 全选账号</label>
+          <span class="hint" id="dt-batch-selected"></span>
+        </div>
+        <table class="data-table" id="dt-table"><thead><tr><th>ID</th><th>内容</th><th>账号</th><th>计划时间</th><th>状态</th><th>重试</th><th>操作</th></tr></thead><tbody></tbody></table>
       </div>
       <div class="pane-card">
         <h3>账号数据看板</h3>
@@ -410,6 +427,136 @@
           <button class="btn small" id="rv-add">反向转发</button>
         </div>
         <div id="tg-list" class="hint"></div>
+      </div>
+      <div class="pane-card">
+        <h3>分发分析</h3>
+        <div class="form-row">
+          <select id="da-days">
+            <option value="7">近 7 天</option>
+            <option value="30" selected>近 30 天</option>
+            <option value="90">近 90 天</option>
+          </select>
+          <button class="btn small primary" id="da-refresh">刷新统计</button>
+        </div>
+        <div id="da-summary" class="hint" style="margin:8px 0"></div>
+        <div class="form-row" style="gap:16px;flex-wrap:wrap">
+          <div style="flex:1;min-width:280px">
+            <h4 style="margin:4px 0">平台分布</h4>
+            <table class="data-table" id="da-platform-table"><thead><tr><th>平台</th><th>总数</th><th>成功</th><th>成功率</th></tr></thead><tbody></tbody></table>
+          </div>
+          <div style="flex:1;min-width:280px">
+            <h4 style="margin:4px 0">时段分布</h4>
+            <canvas id="da-hour-chart" width="320" height="120" style="width:100%;max-width:400px"></canvas>
+          </div>
+        </div>
+      </div>
+      <div class="pane-card">
+        <h3>互动管理 <span class="hint" id="ia-unread-badge"></span></h3>
+        <div class="form-row">
+          <select id="ia-account"><option value="0">全部账号</option></select>
+          <select id="ia-kind"><option value="">全部类型</option><option value="comment">评论</option><option value="dm">私信</option></select>
+          <select id="ia-status"><option value="">全部状态</option><option value="unread">未读</option><option value="read">已读</option><option value="replied">已回复</option></select>
+          <button class="btn small primary" id="ia-refresh">刷新</button>
+          <button class="btn small" id="ia-auto-all">全部自动回复</button>
+        </div>
+        <table class="data-table" id="ia-table"><thead><tr><th>时间</th><th>账号</th><th>类型</th><th>内容</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>自动回复规则</h3>
+        <div class="form-row">
+          <input id="rr-name" placeholder="规则名称" style="width:120px">
+          <select id="rr-match"><option value="keyword">关键词</option><option value="all">全部消息</option></select>
+          <input id="rr-keywords" placeholder="关键词(逗号分隔)" style="width:180px">
+          <input id="rr-reply" placeholder="回复内容" style="flex:1">
+          <select id="rr-priority"><option value="0">普通</option><option value="10">高</option><option value="20">最高</option></select>
+          <button class="btn small primary" id="rr-add">添加规则</button>
+        </div>
+        <table class="data-table" id="rr-table"><thead><tr><th>名称</th><th>匹配</th><th>关键词</th><th>回复</th><th>优先级</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>内容模板</h3>
+        <div class="form-row">
+          <input id="tpl-name" placeholder="模板名称" style="width:140px">
+          <select id="tpl-platform">
+            <option value="">通用</option><option value="抖音">抖音</option><option value="快手">快手</option>
+            <option value="小红书">小红书</option><option value="微信">微信</option><option value="B站">B站</option>
+          </select>
+          <input id="tpl-title" placeholder="标题模板(支持 {{变量}})" style="flex:1">
+        </div>
+        <div class="form-row">
+          <textarea id="tpl-text" rows="2" placeholder="正文模板(支持 {{变量}})" style="flex:1"></textarea>
+          <input id="tpl-vars" placeholder='变量JSON 如 {"标签":"#美食"}' style="width:220px">
+          <button class="btn small primary" id="tpl-add">添加模板</button>
+        </div>
+        <div class="form-row" style="margin-top:4px">
+          <strong>预览：</strong>
+          <select id="tpl-preview-select"></select>
+          <input id="tpl-preview-vars" placeholder='变量值 JSON 如 {"平台名":"抖音"}' style="flex:1">
+          <button class="btn small" id="tpl-preview-go">预览</button>
+          <span class="hint" id="tpl-preview-result"></span>
+        </div>
+        <table class="data-table" id="tpl-table"><thead><tr><th>ID</th><th>名称</th><th>平台</th><th>标题模板</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>发布场景模板</h3>
+        <p class="hint">预置的 App 内发布流程，可直接创建为场景用于调度执行。每个模板包含完整的操作步骤序列（含风控检测和发布验证）。</p>
+        <table class="data-table" id="pt-table"><thead><tr><th>名称</th><th>平台</th><th>步骤数</th><th>变量</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>风控状态</h3>
+        <div class="form-row">
+          <button class="btn small primary" id="risk-refresh">刷新</button>
+          <span class="hint" id="risk-summary"></span>
+        </div>
+        <table class="data-table" id="risk-table"><thead><tr><th>设备</th><th>状态</th><th>原因</th><th>持续时间</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>竞品采集</h3>
+        <div class="form-row">
+          <input id="cs-name" placeholder="采集源名称" style="width:140px">
+          <select id="cs-type"><option value="rss">RSS</option><option value="web">网页</option><option value="api">API</option></select>
+          <input id="cs-url" placeholder="URL" style="flex:1">
+          <input id="cs-platform" placeholder="平台" style="width:80px">
+          <button class="btn small primary" id="cs-add">添加</button>
+          <button class="btn small" id="cs-collect-all">全部采集</button>
+        </div>
+        <table class="data-table" id="cs-table"><thead><tr><th>名称</th><th>平台</th><th>类型</th><th>已采集</th><th>上次采集</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+        <h4 style="margin-top:10px">采集内容</h4>
+        <div class="form-row">
+          <select id="cc-source"><option value="0">全部来源</option></select>
+          <select id="cc-status"><option value="">全部状态</option><option value="new">新</option><option value="reviewed">已审阅</option><option value="promoted">已转用</option></select>
+          <button class="btn small primary" id="cc-refresh">刷新</button>
+        </div>
+        <table class="data-table" id="cc-table"><thead><tr><th>标题</th><th>来源</th><th>平台</th><th>作者</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>A/B 测试</h3>
+        <div class="form-row">
+          <input id="abt-name" placeholder="测试名称" style="width:200px">
+          <button class="btn small primary" id="abt-add">创建测试</button>
+        </div>
+        <table class="data-table" id="abt-table"><thead><tr><th>名称</th><th>状态</th><th>变体数</th><th>创建时间</th><th>操作</th></tr></thead><tbody></tbody></table>
+        <div id="abt-detail" style="margin-top:10px"></div>
+      </div>
+      <div class="pane-card">
+        <h3>情感分析 <span class="hint" id="sa-summary-badge"></span></h3>
+        <div class="form-row">
+          <button class="btn small primary" id="sa-analyze">批量分析</button>
+          <button class="btn small" id="sa-refresh">刷新统计</button>
+          <select id="sa-sentiment"><option value="">全部</option><option value="negative">负面</option><option value="positive">正面</option><option value="neutral">中性</option></select>
+        </div>
+        <div id="sa-summary" class="hint" style="margin:8px 0"></div>
+        <table class="data-table" id="sa-table"><thead><tr><th>时间</th><th>账号</th><th>内容</th><th>情感</th><th>分数</th><th>操作</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="pane-card">
+        <h3>多机协作流水线</h3>
+        <div class="form-row">
+          <input id="rf-name" placeholder="流水线名称" style="width:160px">
+          <input id="rf-desc" placeholder="描述" style="flex:1">
+          <button class="btn small primary" id="rf-add">创建</button>
+        </div>
+        <div class="hint" style="margin:4px 0">在场景编辑器中编排步骤，指定设备执行顺序，系统自动通过 relay 步骤在设备间接力执行。</div>
+        <table class="data-table" id="rf-table"><thead><tr><th>名称</th><th>描述</th><th>设备数</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
       </div>
     </section>
 

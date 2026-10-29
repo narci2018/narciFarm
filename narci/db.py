@@ -48,7 +48,10 @@ CREATE TABLE IF NOT EXISTS distribution_tasks (
     status TEXT DEFAULT 'pending',
     published_at REAL DEFAULT 0,
     platform_post_id TEXT DEFAULT '',
-    error TEXT DEFAULT ''
+    error TEXT DEFAULT '',
+    retry_count INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 3,
+    scenario_id INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS account_metrics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -211,6 +214,127 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS content_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT '',
+    title_template TEXT DEFAULT '',
+    text_template TEXT DEFAULT '',
+    variables TEXT DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS interaction_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    platform TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'comment',
+    author_name TEXT DEFAULT '',
+    author_id TEXT DEFAULT '',
+    content TEXT DEFAULT '',
+    post_title TEXT DEFAULT '',
+    post_id TEXT DEFAULT '',
+    status TEXT DEFAULT 'unread',
+    replied INTEGER DEFAULT 0,
+    reply_text TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_interaction_account ON interaction_messages(account_id);
+CREATE INDEX IF NOT EXISTS idx_interaction_status ON interaction_messages(status);
+
+CREATE TABLE IF NOT EXISTS reply_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    account_id INTEGER DEFAULT 0,
+    platform TEXT DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'comment',
+    match_type TEXT NOT NULL DEFAULT 'keyword',
+    keywords TEXT DEFAULT '[]',
+    reply_text TEXT NOT NULL DEFAULT '',
+    priority INTEGER DEFAULT 0,
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS competitor_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    platform TEXT DEFAULT '',
+    source_type TEXT NOT NULL DEFAULT 'rss',
+    url TEXT NOT NULL DEFAULT '',
+    api_key TEXT DEFAULT '',
+    config TEXT DEFAULT '{}',
+    collect_interval REAL DEFAULT 3600,
+    enabled INTEGER DEFAULT 1,
+    last_collect REAL DEFAULT 0,
+    total_collected INTEGER DEFAULT 0,
+    last_error TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS competitor_contents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL,
+    platform TEXT DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT DEFAULT '',
+    url TEXT DEFAULT '',
+    author TEXT DEFAULT '',
+    metrics TEXT DEFAULT '{}',
+    content_hash TEXT DEFAULT '',
+    tags TEXT DEFAULT '[]',
+    status TEXT DEFAULT 'new',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (source_id) REFERENCES competitor_sources(id)
+);
+CREATE INDEX IF NOT EXISTS idx_cc_source ON competitor_contents(source_id);
+CREATE INDEX IF NOT EXISTS idx_cc_hash ON competitor_contents(content_hash);
+CREATE INDEX IF NOT EXISTS idx_cc_status ON competitor_contents(status);
+
+CREATE TABLE IF NOT EXISTS ab_tests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    content_id INTEGER NOT NULL DEFAULT 0,
+    status TEXT DEFAULT 'draft',
+    winner_variant_id INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    started_at REAL DEFAULT 0,
+    ended_at REAL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS ab_variants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    test_id INTEGER NOT NULL,
+    variant_key TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    text TEXT DEFAULT '',
+    media_path TEXT DEFAULT '',
+    account_id INTEGER NOT NULL DEFAULT 0,
+    task_id INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'pending',
+    views INTEGER DEFAULT 0,
+    likes INTEGER DEFAULT 0,
+    comments INTEGER DEFAULT 0,
+    shares INTEGER DEFAULT 0,
+    followers_gained INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (test_id) REFERENCES ab_tests(id)
+);
+CREATE INDEX IF NOT EXISTS idx_abv_test ON ab_variants(test_id);
+
+CREATE TABLE IF NOT EXISTS relay_flows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    steps TEXT NOT NULL DEFAULT '[]',
+    device_order TEXT NOT NULL DEFAULT '[]',
+    status TEXT DEFAULT 'idle',
+    current_device_idx INTEGER DEFAULT 0,
+    run_id TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
 """
 
 
@@ -221,7 +345,35 @@ def connect(db_path: Path = DB_PATH) -> None:
         _conn.row_factory = sqlite3.Row
         _conn.execute("PRAGMA journal_mode=WAL")
         _conn.executescript(_SCHEMA)
+        _migrate(_conn)
         _conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """增量迁移：为旧库添加新列。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(distribution_tasks)").fetchall()}
+    if "retry_count" not in cols:
+        conn.execute("ALTER TABLE distribution_tasks ADD COLUMN retry_count INTEGER DEFAULT 0")
+    if "max_retries" not in cols:
+        conn.execute("ALTER TABLE distribution_tasks ADD COLUMN max_retries INTEGER DEFAULT 3")
+    if "scenario_id" not in cols:
+        conn.execute("ALTER TABLE distribution_tasks ADD COLUMN scenario_id INTEGER DEFAULT 0")
+
+    # 互动消息表增加情感分析列
+    im_cols = {r["name"] for r in conn.execute("PRAGMA table_info(interaction_messages)").fetchall()}
+    if "sentiment" not in im_cols:
+        conn.execute("ALTER TABLE interaction_messages ADD COLUMN sentiment TEXT DEFAULT 'unknown'")
+    if "sentiment_score" not in im_cols:
+        conn.execute("ALTER TABLE interaction_messages ADD COLUMN sentiment_score REAL DEFAULT 0")
+    if "sentiment_detail" not in im_cols:
+        conn.execute("ALTER TABLE interaction_messages ADD COLUMN sentiment_detail TEXT DEFAULT ''")
+
+    # 分发任务增加 A/B 测试列
+    dt_cols = {r["name"] for r in conn.execute("PRAGMA table_info(distribution_tasks)").fetchall()}
+    if "ab_variant_id" not in dt_cols:
+        conn.execute("ALTER TABLE distribution_tasks ADD COLUMN ab_variant_id INTEGER DEFAULT 0")
+    if "content_snapshot" not in dt_cols:
+        conn.execute("ALTER TABLE distribution_tasks ADD COLUMN content_snapshot TEXT DEFAULT ''")
 
 
 def _now() -> str:
@@ -727,6 +879,19 @@ def get_account(account_id: int) -> Optional[dict]:
     return query_one("SELECT * FROM accounts WHERE id=?", (account_id,))
 
 
+def update_account(account_id: int, **fields) -> None:
+    allowed = {"platform", "name", "username", "api_token", "api_base", "avatar_url", "status"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return
+    params.append(account_id)
+    execute(f"UPDATE accounts SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
 def delete_account(account_id: int) -> None:
     execute("DELETE FROM account_bindings WHERE account_id=?", (account_id,))
     execute("DELETE FROM distribution_tasks WHERE account_id=?", (account_id,))
@@ -756,16 +921,51 @@ def list_contents() -> list[dict]:
     return query("SELECT * FROM contents ORDER BY id DESC")
 
 
+def get_content(content_id: int) -> Optional[dict]:
+    return query_one("SELECT * FROM contents WHERE id=?", (content_id,))
+
+
+def update_content(content_id: int, **fields) -> None:
+    allowed = {"title", "type", "text", "media_path", "status"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return
+    params.append(content_id)
+    execute(f"UPDATE contents SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
 def delete_content(content_id: int) -> None:
     execute("DELETE FROM distribution_tasks WHERE content_id=?", (content_id,))
     execute("DELETE FROM contents WHERE id=?", (content_id,))
 
 
-def create_distribution_task(content_id: int, account_id: int, scheduled_at: float) -> dict:
+def create_distribution_task(content_id: int, account_id: int, scheduled_at: float,
+                             max_retries: int = 3) -> dict:
     import time
-    execute("INSERT INTO distribution_tasks(content_id, account_id, scheduled_at) VALUES(?,?,?)",
-            (content_id, account_id, scheduled_at))
+    execute("INSERT INTO distribution_tasks(content_id, account_id, scheduled_at, max_retries) "
+            "VALUES(?,?,?,?)", (content_id, account_id, scheduled_at, max_retries))
     return query_one("SELECT * FROM distribution_tasks ORDER BY id DESC LIMIT 1", ())
+
+
+def create_distribution_tasks_batch(content_id: int, account_ids: list[int],
+                                    scheduled_at: float, interval_minutes: float = 0,
+                                    max_retries: int = 3) -> list[dict]:
+    """批量创建分发任务：一条内容 → N 个账号，可配置错峰间隔。"""
+    import time
+    results = []
+    for i, account_id in enumerate(account_ids):
+        offset = interval_minutes * 60 * i  # 每个账号递增间隔
+        task_time = scheduled_at + offset
+        execute("INSERT INTO distribution_tasks(content_id, account_id, scheduled_at, max_retries) "
+                "VALUES(?,?,?,?)", (content_id, account_id, task_time, max_retries))
+        task = query_one("SELECT * FROM distribution_tasks ORDER BY id DESC LIMIT 1", ())
+        if task:
+            results.append(task)
+    return results
 
 
 def list_distribution_tasks(limit: int = 100) -> list[dict]:
@@ -780,13 +980,18 @@ def list_distribution_tasks(limit: int = 100) -> list[dict]:
 
 
 def due_distribution_tasks(now: Optional[float] = None) -> list[dict]:
+    """到期任务 + 可重试的失败任务。"""
     now = now or time.time()
-    return query("SELECT * FROM distribution_tasks WHERE status='pending' AND scheduled_at<=? "
-                 "ORDER BY scheduled_at LIMIT 50", (now,))
+    pending = query("SELECT * FROM distribution_tasks WHERE status='pending' AND scheduled_at<=? "
+                    "ORDER BY scheduled_at LIMIT 50", (now,))
+    retryable = query("SELECT * FROM distribution_tasks WHERE status='failed' "
+                      "AND retry_count < max_retries AND scheduled_at<=? "
+                      "ORDER BY scheduled_at LIMIT 20", (now,))
+    return pending + retryable
 
 
 def update_distribution_task(task_id: int, **fields) -> None:
-    allowed = {"status", "published_at", "platform_post_id", "error"}
+    allowed = {"status", "published_at", "platform_post_id", "error", "retry_count", "max_retries", "scheduled_at"}
     sets, params = [], []
     for k, v in fields.items():
         if k in allowed:
@@ -796,6 +1001,19 @@ def update_distribution_task(task_id: int, **fields) -> None:
         return
     params.append(task_id)
     execute(f"UPDATE distribution_tasks SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
+def cancel_distribution_task(task_id: int) -> None:
+    """取消待执行的任务。"""
+    execute("UPDATE distribution_tasks SET status='cancelled' WHERE id=? AND status='pending'",
+            (task_id,))
+
+
+def retry_distribution_task(task_id: int) -> None:
+    """手动重试失败的任务：重置状态并推后执行时间。"""
+    import time
+    execute("UPDATE distribution_tasks SET status='pending', scheduled_at=?, error='' "
+            "WHERE id=? AND status='failed'", (time.time(), task_id))
 
 
 def record_metric(account_id: int, ts: float, followers: int = 0, following: int = 0,
@@ -819,6 +1037,207 @@ def metrics_summary() -> dict:
     return {"accounts": accounts, "history": history}
 
 
+# ---------- 阶段二: 数据看板 / 分发分析 / 互动管理 / 模板 ----------
+
+def metrics_range(account_id: int, start_ts: float, end_ts: float,
+                  granularity: str = "day") -> list[dict]:
+    """按时间粒度聚合指标（day/week/month）。"""
+    if granularity == "day":
+        fmt = "%Y-%m-%d"
+    elif granularity == "week":
+        fmt = "%Y-W%W"
+    else:
+        fmt = "%Y-%m"
+    return query(
+        f"SELECT strftime(?, ts, 'unixepoch') AS period, "
+        f"MAX(followers) AS followers, MAX(likes) AS likes, "
+        f"MAX(comments) AS comments, MAX(views) AS views "
+        f"FROM account_metrics WHERE account_id=? AND ts>=? AND ts<=? "
+        f"GROUP BY period ORDER BY period",
+        (fmt, account_id, start_ts, end_ts))
+
+
+def distribution_analytics(days: int = 30) -> dict:
+    """分发统计：成功率、平台维度、时段效果。"""
+    import time
+    since = time.time() - days * 86400
+    total = query_one(
+        "SELECT COUNT(*) AS cnt FROM distribution_tasks WHERE scheduled_at>=?", (since,))
+    success = query_one(
+        "SELECT COUNT(*) AS cnt FROM distribution_tasks WHERE status='published' AND scheduled_at>=?",
+        (since,))
+    failed = query_one(
+        "SELECT COUNT(*) AS cnt FROM distribution_tasks WHERE status='failed' AND scheduled_at>=?",
+        (since,))
+    by_platform = query(
+        "SELECT a.platform, COUNT(*) AS total, "
+        "SUM(CASE WHEN dt.status='published' THEN 1 ELSE 0 END) AS ok "
+        "FROM distribution_tasks dt JOIN accounts a ON a.id=dt.account_id "
+        "WHERE dt.scheduled_at>=? GROUP BY a.platform", (since,))
+    by_hour = query(
+        "SELECT CAST(strftime('%H', scheduled_at, 'unixepoch', 'localtime') AS INTEGER) AS hr, "
+        "COUNT(*) AS cnt, "
+        "SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) AS ok "
+        "FROM distribution_tasks WHERE scheduled_at>=? GROUP BY hr ORDER BY hr", (since,))
+    return {
+        "period_days": days,
+        "total": total["cnt"] if total else 0,
+        "success": success["cnt"] if success else 0,
+        "failed": failed["cnt"] if failed else 0,
+        "success_rate": round(success["cnt"] / total["cnt"] * 100, 1) if total and total["cnt"] else 0,
+        "by_platform": by_platform,
+        "by_hour": by_hour,
+    }
+
+
+# --- 互动消息 ---
+
+def create_interaction(account_id: int, platform: str, kind: str, content: str,
+                       author_name: str = "", author_id: str = "",
+                       post_title: str = "", post_id: str = "") -> dict:
+    execute("INSERT INTO interaction_messages(account_id, platform, kind, content, "
+            "author_name, author_id, post_title, post_id) VALUES(?,?,?,?,?,?,?,?)",
+            (account_id, platform, kind, content, author_name, author_id, post_title, post_id))
+    return query_one("SELECT * FROM interaction_messages ORDER BY id DESC LIMIT 1", ())
+
+
+def list_interactions(account_id: int = 0, status: str = "", kind: str = "",
+                      limit: int = 100, sentiment_filter: str = "") -> list[dict]:
+    sql = "SELECT m.*, a.name AS account_name, a.platform AS acct_platform " \
+          "FROM interaction_messages m LEFT JOIN accounts a ON a.id=m.account_id WHERE 1=1"
+    params: list = []
+    if account_id:
+        sql += " AND m.account_id=?"
+        params.append(account_id)
+    if status:
+        sql += " AND m.status=?"
+        params.append(status)
+    if kind:
+        sql += " AND m.kind=?"
+        params.append(kind)
+    if sentiment_filter:
+        sql += " AND m.sentiment=?"
+        params.append(sentiment_filter)
+    sql += " ORDER BY m.created_at DESC LIMIT ?"
+    params.append(limit)
+    return query(sql, tuple(params))
+
+
+def mark_interaction_replied(msg_id: int, reply_text: str) -> None:
+    execute("UPDATE interaction_messages SET replied=1, reply_text=?, status='replied' WHERE id=?",
+            (reply_text, msg_id))
+
+
+def mark_interaction_read(msg_id: int) -> None:
+    execute("UPDATE interaction_messages SET status='read' WHERE id=? AND status='unread'", (msg_id,))
+
+
+def count_unread_interactions(account_id: int = 0) -> int:
+    if account_id:
+        r = query_one("SELECT COUNT(*) AS cnt FROM interaction_messages "
+                      "WHERE status='unread' AND account_id=?", (account_id,))
+    else:
+        r = query_one("SELECT COUNT(*) AS cnt FROM interaction_messages WHERE status='unread'", ())
+    return r["cnt"] if r else 0
+
+
+# --- 自动回复规则 ---
+
+def create_reply_rule(name: str, reply_text: str, account_id: int = 0,
+                      platform: str = "", kind: str = "comment",
+                      match_type: str = "keyword", keywords: str = "[]",
+                      priority: int = 0) -> dict:
+    execute("INSERT INTO reply_rules(name, account_id, platform, kind, match_type, "
+            "keywords, reply_text, priority) VALUES(?,?,?,?,?,?,?,?)",
+            (name, account_id, platform, kind, match_type, keywords, reply_text, priority))
+    return query_one("SELECT * FROM reply_rules ORDER BY id DESC LIMIT 1", ())
+
+
+def list_reply_rules(account_id: int = 0) -> list[dict]:
+    if account_id:
+        return query("SELECT * FROM reply_rules WHERE account_id=? ORDER BY priority DESC, id",
+                     (account_id,))
+    return query("SELECT * FROM reply_rules ORDER BY priority DESC, id")
+
+
+def get_reply_rules_for_account(account_id: int, kind: str = "") -> list[dict]:
+    """获取指定账号的启用规则（含全局规则 kind=''）。"""
+    if kind:
+        return query(
+            "SELECT * FROM reply_rules WHERE enabled=1 AND (account_id=? OR account_id=0) "
+            "AND (platform='' OR platform=(SELECT platform FROM accounts WHERE id=?)) "
+            "AND (kind=? OR kind='') ORDER BY priority DESC, id",
+            (account_id, account_id, kind))
+    return query(
+        "SELECT * FROM reply_rules WHERE enabled=1 AND (account_id=? OR account_id=0) "
+        "AND (platform='' OR platform=(SELECT platform FROM accounts WHERE id=?)) "
+        "ORDER BY priority DESC, id",
+        (account_id, account_id))
+
+
+def update_reply_rule(rule_id: int, **fields) -> None:
+    allowed = {"name", "account_id", "platform", "kind", "match_type",
+               "keywords", "reply_text", "priority", "enabled"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return
+    params.append(rule_id)
+    execute(f"UPDATE reply_rules SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
+def delete_reply_rule(rule_id: int) -> None:
+    execute("DELETE FROM reply_rules WHERE id=?", (rule_id,))
+
+
+# --- 内容模板 ---
+
+def create_content_template(name: str, platform: str = "", title_template: str = "",
+                            text_template: str = "", variables: str = "{}") -> dict:
+    execute("INSERT INTO content_templates(name, platform, title_template, text_template, variables) "
+            "VALUES(?,?,?,?,?)", (name, platform, title_template, text_template, variables))
+    return query_one("SELECT * FROM content_templates ORDER BY id DESC LIMIT 1", ())
+
+
+def list_content_templates(platform: str = "") -> list[dict]:
+    if platform:
+        return query("SELECT * FROM content_templates WHERE platform=? ORDER BY id DESC",
+                     (platform,))
+    return query("SELECT * FROM content_templates ORDER BY id DESC")
+
+
+def get_content_template(template_id: int) -> Optional[dict]:
+    return query_one("SELECT * FROM content_templates WHERE id=?", (template_id,))
+
+
+def update_content_template(template_id: int, **fields) -> None:
+    allowed = {"name", "platform", "title_template", "text_template", "variables"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return
+    params.append(template_id)
+    execute(f"UPDATE content_templates SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
+def delete_content_template(template_id: int) -> None:
+    execute("DELETE FROM content_templates WHERE id=?", (template_id,))
+
+
+def render_template(template_text: str, variables: dict) -> str:
+    """简单的变量替换：{{key}} → value。"""
+    result = template_text
+    for k, v in variables.items():
+        result = result.replace("{{" + k + "}}", str(v))
+    return result
+
+
 def set_device_tag(serial: str, key: str, value: str) -> None:
     execute("INSERT INTO device_tags(serial, tag_key, tag_value) VALUES(?,?,?) "
             "ON CONFLICT(serial, tag_key) DO UPDATE SET tag_value=excluded.tag_value",
@@ -835,4 +1254,281 @@ def list_device_tags() -> dict:
     for r in query("SELECT * FROM device_tags"):
         out.setdefault(r["serial"], {})[r["tag_key"]] = r["tag_value"]
     return out
+
+
+# ---------- 阶段四: 竞品采集 / 多机协作 / A-B测试 / 情感分析 ----------
+
+# --- 竞品采集源 ---
+
+def create_competitor_source(name: str, url: str, platform: str = "",
+                             source_type: str = "rss", api_key: str = "",
+                             config: str = "{}",
+                             collect_interval: float = 3600) -> dict:
+    execute("INSERT INTO competitor_sources(name, url, platform, source_type, "
+            "api_key, config, collect_interval) VALUES(?,?,?,?,?,?,?)",
+            (name, url, platform, source_type, api_key, config, collect_interval))
+    return query_one("SELECT * FROM competitor_sources ORDER BY id DESC LIMIT 1", ())
+
+
+def list_competitor_sources(enabled_only: bool = False) -> list[dict]:
+    if enabled_only:
+        return query("SELECT * FROM competitor_sources WHERE enabled=1 ORDER BY id")
+    return query("SELECT * FROM competitor_sources ORDER BY id")
+
+
+def get_competitor_source(source_id: int) -> Optional[dict]:
+    return query_one("SELECT * FROM competitor_sources WHERE id=?", (source_id,))
+
+
+def update_competitor_source(source_id: int, **fields) -> None:
+    allowed = {"name", "url", "platform", "source_type", "api_key", "config",
+               "collect_interval", "enabled", "last_collect", "total_collected", "last_error"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return
+    params.append(source_id)
+    execute(f"UPDATE competitor_sources SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
+def delete_competitor_source(source_id: int) -> None:
+    execute("DELETE FROM competitor_contents WHERE source_id=?", (source_id,))
+    execute("DELETE FROM competitor_sources WHERE id=?", (source_id,))
+
+
+# --- 竞品内容 ---
+
+def create_competitor_content(source_id: int, platform: str, title: str,
+                              content: str = "", url: str = "", author: str = "",
+                              metrics: str = "{}", content_hash: str = "",
+                              tags: str = "[]") -> dict:
+    execute("INSERT INTO competitor_contents(source_id, platform, title, content, "
+            "url, author, metrics, content_hash, tags) VALUES(?,?,?,?,?,?,?,?,?)",
+            (source_id, platform, title, content, url, author, metrics, content_hash, tags))
+    return query_one("SELECT * FROM competitor_contents ORDER BY id DESC LIMIT 1", ())
+
+
+def list_competitor_contents(source_id: int = 0, platform: str = "",
+                             status: str = "", limit: int = 100) -> list[dict]:
+    sql = "SELECT c.*, s.name AS source_name FROM competitor_contents c " \
+          "LEFT JOIN competitor_sources s ON s.id=c.source_id WHERE 1=1"
+    params: list = []
+    if source_id:
+        sql += " AND c.source_id=?"
+        params.append(source_id)
+    if platform:
+        sql += " AND c.platform=?"
+        params.append(platform)
+    if status:
+        sql += " AND c.status=?"
+        params.append(status)
+    sql += " ORDER BY c.created_at DESC LIMIT ?"
+    params.append(limit)
+    return query(sql, tuple(params))
+
+
+def get_competitor_content_by_hash(content_hash: str) -> Optional[dict]:
+    return query_one("SELECT * FROM competitor_contents WHERE content_hash=?",
+                     (content_hash,))
+
+
+def update_competitor_content(content_id: int, **fields) -> None:
+    allowed = {"title", "content", "status", "tags", "metrics"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return
+    params.append(content_id)
+    execute(f"UPDATE competitor_contents SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
+def delete_competitor_content(content_id: int) -> None:
+    execute("DELETE FROM competitor_contents WHERE id=?", (content_id,))
+
+
+def promote_competitor_content(content_id: int) -> Optional[dict]:
+    """将竞品内容转为自有内容（复制到 contents 表）。"""
+    cc = query_one("SELECT * FROM competitor_contents WHERE id=?", (content_id,))
+    if not cc:
+        return None
+    new_content = create_content(
+        title=cc["title"],
+        type="text",
+        text=cc["content"],
+    )
+    update_competitor_content(content_id, status="promoted")
+    return new_content
+
+
+# --- 情感分析 ---
+
+def update_interaction_sentiment(msg_id: int, sentiment: str,
+                                 sentiment_score: float,
+                                 sentiment_detail: str = "") -> None:
+    execute("UPDATE interaction_messages SET sentiment=?, sentiment_score=?, "
+            "sentiment_detail=? WHERE id=?",
+            (sentiment, sentiment_score, sentiment_detail, msg_id))
+
+
+def list_interactions_with_sentiment(account_id: int = 0, sentiment: str = "",
+                                     limit: int = 100) -> list[dict]:
+    sql = "SELECT m.*, a.name AS account_name, a.platform AS acct_platform " \
+          "FROM interaction_messages m LEFT JOIN accounts a ON a.id=m.account_id WHERE 1=1"
+    params: list = []
+    if account_id:
+        sql += " AND m.account_id=?"
+        params.append(account_id)
+    if sentiment:
+        sql += " AND m.sentiment=?"
+        params.append(sentiment)
+    sql += " ORDER BY m.created_at DESC LIMIT ?"
+    params.append(limit)
+    return query(sql, tuple(params))
+
+
+def sentiment_summary(account_id: int = 0) -> dict:
+    """情感分析汇总统计。"""
+    where = "WHERE 1=1"
+    params: list = []
+    if account_id:
+        where += " AND account_id=?"
+        params.append(account_id)
+    total = query_one(f"SELECT COUNT(*) AS cnt FROM interaction_messages {where}", tuple(params))
+    by_label = query(
+        f"SELECT sentiment, COUNT(*) AS cnt, AVG(sentiment_score) AS avg_score "
+        f"FROM interaction_messages {where} GROUP BY sentiment", tuple(params))
+    negative = query(
+        f"SELECT * FROM interaction_messages {where} AND sentiment='negative' "
+        f"ORDER BY sentiment_score ASC LIMIT 20", tuple(params))
+    return {
+        "total": total["cnt"] if total else 0,
+        "by_label": by_label,
+        "recent_negative": negative,
+    }
+
+
+# --- A/B 测试 ---
+
+def create_ab_test(name: str, content_id: int = 0) -> dict:
+    execute("INSERT INTO ab_tests(name, content_id) VALUES(?,?)", (name, content_id))
+    return query_one("SELECT * FROM ab_tests ORDER BY id DESC LIMIT 1", ())
+
+
+def list_ab_tests() -> list[dict]:
+    tests = query("SELECT * FROM ab_tests ORDER BY id DESC")
+    for t in tests:
+        t["variants"] = query("SELECT * FROM ab_variants WHERE test_id=? ORDER BY id",
+                              (t["id"],))
+    return tests
+
+
+def get_ab_test(test_id: int) -> Optional[dict]:
+    t = query_one("SELECT * FROM ab_tests WHERE id=?", (test_id,))
+    if t:
+        t["variants"] = query("SELECT * FROM ab_variants WHERE test_id=? ORDER BY id",
+                              (test_id,))
+    return t
+
+
+def update_ab_test(test_id: int, **fields) -> None:
+    allowed = {"name", "status", "winner_variant_id", "started_at", "ended_at"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return
+    params.append(test_id)
+    execute(f"UPDATE ab_tests SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
+def delete_ab_test(test_id: int) -> None:
+    execute("DELETE FROM ab_variants WHERE test_id=?", (test_id,))
+    execute("DELETE FROM ab_tests WHERE id=?", (test_id,))
+
+
+def create_ab_variant(test_id: int, variant_key: str, title: str,
+                      text: str = "", media_path: str = "",
+                      account_id: int = 0) -> dict:
+    execute("INSERT INTO ab_variants(test_id, variant_key, title, text, "
+            "media_path, account_id) VALUES(?,?,?,?,?,?)",
+            (test_id, variant_key, title, text, media_path, account_id))
+    return query_one("SELECT * FROM ab_variants ORDER BY id DESC LIMIT 1", ())
+
+
+def update_ab_variant(variant_id: int, **fields) -> None:
+    allowed = {"variant_key", "title", "text", "media_path", "account_id",
+               "task_id", "status", "views", "likes", "comments", "shares",
+               "followers_gained"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return
+    params.append(variant_id)
+    execute(f"UPDATE ab_variants SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
+def ab_test_analytics(test_id: int) -> dict:
+    """A/B 测试效果分析。"""
+    test = query_one("SELECT * FROM ab_tests WHERE id=?", (test_id,))
+    if not test:
+        return {}
+    variants = query("SELECT * FROM ab_variants WHERE test_id=? ORDER BY id", (test_id,))
+    for v in variants:
+        total_engagement = v["views"] + v["likes"] * 3 + v["comments"] * 5 + v["shares"] * 8
+        v["engagement_score"] = total_engagement
+        v["engagement_rate"] = round(total_engagement / max(v["views"], 1) * 100, 2)
+    # 排序找出当前领先者
+    ranked = sorted(variants, key=lambda v: -v["engagement_score"])
+    return {
+        "test": test,
+        "variants": variants,
+        "ranked": ranked,
+        "leader": ranked[0] if ranked else None,
+    }
+
+
+# --- 多机协作流水线 ---
+
+def create_relay_flow(name: str, steps: str, device_order: str,
+                      description: str = "") -> dict:
+    execute("INSERT INTO relay_flows(name, description, steps, device_order) "
+            "VALUES(?,?,?,?)", (name, description, steps, device_order))
+    return query_one("SELECT * FROM relay_flows ORDER BY id DESC LIMIT 1", ())
+
+
+def list_relay_flows() -> list[dict]:
+    return query("SELECT * FROM relay_flows ORDER BY id DESC")
+
+
+def get_relay_flow(flow_id: int) -> Optional[dict]:
+    return query_one("SELECT * FROM relay_flows WHERE id=?", (flow_id,))
+
+
+def update_relay_flow(flow_id: int, **fields) -> None:
+    allowed = {"name", "description", "steps", "device_order", "status",
+               "current_device_idx", "run_id"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            params.append(v)
+    if not sets:
+        return
+    params.append(flow_id)
+    execute(f"UPDATE relay_flows SET {', '.join(sets)} WHERE id=?", tuple(params))
+
+
+def delete_relay_flow(flow_id: int) -> None:
+    execute("DELETE FROM relay_flows WHERE id=?", (flow_id,))
 

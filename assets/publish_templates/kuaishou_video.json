@@ -1,0 +1,27 @@
+{
+  "name": "快手短视频发布",
+  "platform": "快手",
+  "description": "通过快手App发布短视频（需提前登录）",
+  "package": "com.smile.gifmaker",
+  "steps": [
+    {"type": "detect_risk", "ocr_keywords": ["验证码", "安全验证", "操作频繁"], "on_risk": "abort"},
+    {"type": "launch", "package": "com.smile.gifmaker"},
+    {"type": "wait", "ms": 3000},
+    {"type": "detect_risk", "ocr_keywords": ["验证码", "安全验证"], "on_risk": "abort"},
+    {"type": "tap_el", "kind": "desc", "value": "拍摄", "timeout_ms": 5000},
+    {"type": "wait", "ms": 2000},
+    {"type": "tap_el", "kind": "text", "value": "相册", "timeout_ms": 5000},
+    {"type": "wait", "ms": 2000},
+    {"type": "tap_el", "kind": "desc", "value": "下一步", "timeout_ms": 5000},
+    {"type": "wait", "ms": 2000},
+    {"type": "tap_el", "kind": "id", "value": "description_edit", "timeout_ms": 3000},
+    {"type": "text", "text": "{{title}}"},
+    {"type": "wait", "ms": 1000},
+    {"type": "tap_el", "kind": "text", "value": "发布", "timeout_ms": 5000},
+    {"type": "wait", "ms": 5000},
+    {"type": "verify_publish", "ocr_text": "发布成功", "wait_ms": 8000, "strict_ocr": false},
+    {"type": "detect_risk", "ocr_keywords": ["验证码", "审核", "违规"], "on_risk": "screenshot"}
+  ],
+  "variables": ["title"],
+  "timeout_sec": 120
+}

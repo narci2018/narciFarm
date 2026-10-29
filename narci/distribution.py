@@ -65,29 +65,64 @@ def get_publisher(account: dict) -> PlatformPublisher:
     return ManualPublisher()
 
 
+async def _execute_task(task: dict) -> None:
+    """执行单个分发任务，含重试逻辑。"""
+    content = db.get_content(task["content_id"])
+    account = db.get_account(task["account_id"])
+    if not content or not account:
+        db.update_distribution_task(task["id"], status="failed", error="内容或账号不存在")
+        return
+
+    publisher = get_publisher(account)
+    try:
+        result = await publisher.publish(content, account)
+    except Exception as e:
+        result = {"ok": False, "error": str(e)}
+
+    if result.get("ok"):
+        db.update_distribution_task(
+            task["id"], status="published", published_at=time.time(),
+            platform_post_id=result.get("platform_post_id", ""))
+        # 同步更新内容状态为已发
+        db.update_content(task["content_id"], status="published")
+        is_retry = task.get("status") == "failed"
+        bus.info(f"{'重试' if is_retry else ''}分发成功: [{content['title']}] → "
+                 f"{account['name']} ({publisher.name})")
+    else:
+        retry_count = (task.get("retry_count") or 0) + 1
+        max_retries = task.get("max_retries") or 3
+        if retry_count <= max_retries:
+            # 指数退避：30s, 2min, 8min, 30min...
+            backoff = 30 * (4 ** (retry_count - 1))
+            db.update_distribution_task(
+                task["id"], status="failed", error=result.get("error", ""),
+                retry_count=retry_count,
+                scheduled_at=time.time() + backoff)
+            bus.warn(f"分发失败(第{retry_count}/{max_retries}次): [{content['title']}] → "
+                     f"{account['name']}: {result.get('error')}，{backoff}s 后重试")
+        else:
+            db.update_distribution_task(
+                task["id"], status="failed", error=result.get("error", ""),
+                retry_count=retry_count)
+            bus.warn(f"分发最终失败({retry_count}次): [{content['title']}] → "
+                     f"{account['name']}: {result.get('error')}")
+
+
 async def run_due_tasks() -> int:
     """执行到期的分发任务, 返回执行数量。"""
     tasks = db.due_distribution_tasks()
     for task in tasks:
-        content = db.get_content(task["content_id"]) if hasattr(db, "get_content") else None
-        if content is None:
-            rows = db.query("SELECT * FROM contents WHERE id=?", (task["content_id"],))
-            content = rows[0] if rows else None
-        account = db.get_account(task["account_id"])
-        if not content or not account:
-            db.update_distribution_task(task["id"], status="failed", error="内容或账号不存在")
-            continue
-        publisher = get_publisher(account)
-        try:
-            result = await publisher.publish(content, account)
-        except Exception as e:
-            result = {"ok": False, "error": str(e)}
-        if result.get("ok"):
-            db.update_distribution_task(
-                task["id"], status="published", published_at=time.time(),
-                platform_post_id=result.get("platform_post_id", ""))
-            bus.info(f"分发成功: [{content['title']}] → {account['name']} ({publisher.name})")
-        else:
-            db.update_distribution_task(task["id"], status="failed", error=result.get("error", ""))
-            bus.warn(f"分发失败: [{content['title']}] → {account['name']}: {result.get('error')}")
+        await _execute_task(task)
     return len(tasks)
+
+
+async def publish_now(content_id: int, account_ids: list[int]) -> list[dict]:
+    """立即发布：绕过调度器，直接执行。"""
+    results = []
+    for account_id in account_ids:
+        task = db.create_distribution_task(content_id, account_id, time.time(), max_retries=0)
+        if task:
+            await _execute_task(task)
+            updated = db.query_one("SELECT * FROM distribution_tasks WHERE id=?", (task["id"],))
+            results.append(updated or task)
+    return results
